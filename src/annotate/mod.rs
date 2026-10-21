@@ -105,22 +105,6 @@ impl Document {
         self.origin
     }
 
-    /// 选区移动/缩放后重新裁剪底图；仅在没有标注时调用。
-    pub fn recrop(&mut self, frame: &Frame, rect: RectI) -> Result<()> {
-        if self.width == rect.width as u32 && self.height == rect.height as u32 {
-            let crop = frame.crop(rect)?;
-            self.base.copy_from_slice(&crop.bgra);
-            self.surface.pixels_mut().copy_from_slice(&self.base);
-            self.origin = (rect.x, rect.y);
-            self.shapes.clear();
-            self.undone.clear();
-            Ok(())
-        } else {
-            *self = Self::from_frame(frame, rect)?;
-            Ok(())
-        }
-    }
-
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -346,42 +330,6 @@ mod tests {
             }
         }
         assert!(red_found, "序号圆点未渲染");
-    }
-
-    #[test]
-    fn recrop_follows_screen_position() {
-        // 100x100 渐变画面：像素值 = (x*2, y*2, 0)。
-        let mut base = vec![0u8; 100 * 100 * 4];
-        for y in 0..100usize {
-            for x in 0..100usize {
-                let offset = (y * 100 + x) * 4;
-                base[offset] = (x * 2) as u8;
-                base[offset + 1] = (y * 2) as u8;
-                base[offset + 2] = 0;
-                base[offset + 3] = 255;
-            }
-        }
-        let screen = Frame {
-            width: 100,
-            height: 100,
-            origin: (0, 0),
-            bgra: base,
-        };
-        let mut doc =
-            Document::from_frame(&screen, RectI::new(10, 10, 20, 20)).expect("创建文档失败");
-
-        let surface_pixel = |doc: &Document, x: usize, y: usize| {
-            let offset = (y * doc.width() as usize + x) * 4;
-            let pixels = doc.surface().pixels();
-            (pixels[offset], pixels[offset + 1])
-        };
-        assert_eq!(surface_pixel(&doc, 0, 0), (20, 20));
-
-        // 模拟移动选区：同尺寸重裁，内容必须跟着画面走。
-        doc.recrop(&screen, RectI::new(40, 30, 20, 20))
-            .expect("重裁失败");
-        assert_eq!(doc.origin(), (40, 30));
-        assert_eq!(surface_pixel(&doc, 0, 0), (80, 60));
     }
 
     #[test]

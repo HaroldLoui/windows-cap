@@ -58,6 +58,7 @@ use crate::util::error::Result;
 const CLASS_NAME: PCWSTR = w!("window_cap_overlay");
 const WM_FINISHED: u32 = WM_APP + 1;
 const TIMER_SCRIPT: usize = 1;
+const TIMER_REPAINT: usize = 2;
 
 /// 遮罩参数。
 #[derive(Clone, Copy, Debug, Default)]
@@ -124,6 +125,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             first_paint_ms: None,
             paints: 0,
             paint_total_ms: 0.0,
+            repaint_pending: false,
             cursor: (area.x, area.y),
             previous_foreground,
         });
@@ -259,6 +261,7 @@ struct Overlay {
     first_paint_ms: Option<f64>,
     paints: u32,
     paint_total_ms: f64,
+    repaint_pending: bool,
     cursor: (i32, i32),
     previous_foreground: HWND,
 }
@@ -309,32 +312,29 @@ impl Overlay {
         Ok(())
     }
 
-    /// 选区移动/缩放过程中持续重裁底图，保证内容跟着画面走而不是跟着边框走。
-    fn sync_document(&mut self, rect: RectI) {
-        if self.has_shapes() {
-            return;
-        }
-        let same = self
-            .document
-            .as_ref()
-            .map(|document| {
-                document.width() == rect.width as u32
-                    && document.height() == rect.height as u32
-                    && document.origin() == (rect.x, rect.y)
-            })
-            .unwrap_or(false);
-        if same {
+    /// 把冻结帧中选区位置的亮色像素直接拷进合成缓冲（不分配、不重建文档）。
+    fn copy_frame_region(&mut self, current: RectI) {
+        let area_width = self.area.width as usize;
+        let area_height = self.area.height as usize;
+        let x = (current.x - self.area.x) as usize;
+        let y = (current.y - self.area.y) as usize;
+        let width = current.width as usize;
+        let height = current.height as usize;
+        if width == 0 || height == 0 || x + width > area_width || y + height > area_height {
             return;
         }
 
-        let result = match self.document.as_mut() {
-            Some(document) => document.recrop(&self.frame, rect),
-            None => Document::from_frame(&self.frame, rect).map(|document| {
-                self.document = Some(document);
-            }),
-        };
-        if let Err(error) = result {
-            ::log::error!("重新裁剪文档失败: {error}");
+        let frame = &self.frame.bgra;
+        let composed = self.composed.pixels_mut();
+        if frame.len() != composed.len() {
+            return;
+        }
+
+        let row_bytes = width * 4;
+        for row in 0..height {
+            let offset = ((y + row) * area_width + x) * 4;
+            composed[offset..offset + row_bytes]
+                .copy_from_slice(&frame[offset..offset + row_bytes]);
         }
     }
 
@@ -452,7 +452,7 @@ impl Overlay {
         self.invalidate();
     }
 
-    fn compose(&self) {
+    fn compose(&mut self) {
         unsafe {
             let hdc = self.composed.dc;
             let _ = BitBlt(
@@ -473,11 +473,13 @@ impl Overlay {
             };
             let local = self.to_local(current);
 
-            // 选区内容贴文档表面（底图 + 标注）；文档始终与选区位置一致。
-            if let (Some(_), Some(document)) = (self.selection.rect(), &self.document)
+            // 有标注时贴文档表面（含标注）；否则直接从冻结帧拷亮区，拖动/缩放时不再重建文档。
+            let mut blitted_from_document = false;
+            if self.has_shapes()
+                && let Some(document) = &self.document
+                && document.origin() == (current.x, current.y)
                 && document.width() == current.width as u32
                 && document.height() == current.height as u32
-                && document.origin() == (current.x, current.y)
             {
                 let _ = BitBlt(
                     hdc,
@@ -490,6 +492,10 @@ impl Overlay {
                     0,
                     SRCCOPY,
                 );
+                blitted_from_document = true;
+            }
+            if !blitted_from_document {
+                self.copy_frame_region(current);
             }
 
             if let Some(drag) = &self.drag
@@ -914,15 +920,10 @@ impl Overlay {
 
         if self.drag.is_some() {
             self.update_drag(screen);
-            self.invalidate();
+            self.schedule_repaint();
         } else if self.selection.is_active() {
             self.selection.update(screen.0, screen.1, self.area);
-            if !self.selection.is_creating()
-                && let Some(rect) = self.selection.rect()
-            {
-                self.sync_document(rect);
-            }
-            self.invalidate();
+            self.schedule_repaint();
         }
 
         if let Some(rect) = self.selection.rect()
@@ -1068,6 +1069,25 @@ impl Overlay {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
+    }
+
+    /// 连续拖动时合并重绘：最多约 120 次/秒，避免每个鼠标事件都触发整屏合成。
+    fn schedule_repaint(&mut self) {
+        if self.repaint_pending {
+            return;
+        }
+        self.repaint_pending = true;
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_REPAINT, 8, None);
+        }
+    }
+
+    fn request_repaint(&mut self) {
+        self.repaint_pending = false;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_REPAINT);
+        }
+        self.invalidate();
     }
 }
 
@@ -1273,10 +1293,12 @@ unsafe extern "system" fn overlay_wndproc(
                 LRESULT(1)
             }
             WM_TIMER => {
-                if let Some(overlay) = state(hwnd)
-                    && wparam.0 == TIMER_SCRIPT
-                {
-                    overlay.confirm();
+                if let Some(overlay) = state(hwnd) {
+                    match wparam.0 {
+                        TIMER_SCRIPT => overlay.confirm(),
+                        TIMER_REPAINT => overlay.request_repaint(),
+                        _ => {}
+                    }
                 }
                 LRESULT(0)
             }
