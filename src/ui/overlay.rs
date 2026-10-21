@@ -58,7 +58,6 @@ use crate::util::error::Result;
 const CLASS_NAME: PCWSTR = w!("window_cap_overlay");
 const WM_FINISHED: u32 = WM_APP + 1;
 const TIMER_SCRIPT: usize = 1;
-const TIMER_REPAINT: usize = 2;
 
 /// 遮罩参数。
 #[derive(Clone, Copy, Debug, Default)]
@@ -125,7 +124,6 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             first_paint_ms: None,
             paints: 0,
             paint_total_ms: 0.0,
-            repaint_pending: false,
             cursor: (area.x, area.y),
             previous_foreground,
         });
@@ -261,7 +259,6 @@ struct Overlay {
     first_paint_ms: Option<f64>,
     paints: u32,
     paint_total_ms: f64,
-    repaint_pending: bool,
     cursor: (i32, i32),
     previous_foreground: HWND,
 }
@@ -920,10 +917,10 @@ impl Overlay {
 
         if self.drag.is_some() {
             self.update_drag(screen);
-            self.schedule_repaint();
+            self.invalidate();
         } else if self.selection.is_active() {
             self.selection.update(screen.0, screen.1, self.area);
-            self.schedule_repaint();
+            self.invalidate();
         }
 
         if let Some(rect) = self.selection.rect()
@@ -1069,25 +1066,6 @@ impl Overlay {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
-    }
-
-    /// 连续拖动时合并重绘：最多约 120 次/秒，避免每个鼠标事件都触发整屏合成。
-    fn schedule_repaint(&mut self) {
-        if self.repaint_pending {
-            return;
-        }
-        self.repaint_pending = true;
-        unsafe {
-            SetTimer(Some(self.hwnd), TIMER_REPAINT, 8, None);
-        }
-    }
-
-    fn request_repaint(&mut self) {
-        self.repaint_pending = false;
-        unsafe {
-            let _ = KillTimer(Some(self.hwnd), TIMER_REPAINT);
-        }
-        self.invalidate();
     }
 }
 
@@ -1293,12 +1271,10 @@ unsafe extern "system" fn overlay_wndproc(
                 LRESULT(1)
             }
             WM_TIMER => {
-                if let Some(overlay) = state(hwnd) {
-                    match wparam.0 {
-                        TIMER_SCRIPT => overlay.confirm(),
-                        TIMER_REPAINT => overlay.request_repaint(),
-                        _ => {}
-                    }
+                if let Some(overlay) = state(hwnd)
+                    && wparam.0 == TIMER_SCRIPT
+                {
+                    overlay.confirm();
                 }
                 LRESULT(0)
             }
