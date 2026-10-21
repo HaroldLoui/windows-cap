@@ -65,6 +65,21 @@ impl Dib {
         }
     }
 
+    /// 从自顶向下 BGRA 数据创建 DIB。
+    pub fn from_bgra(width: u32, height: u32, data: &[u8]) -> Result<Self> {
+        let mut dib = Self::new(width, height)?;
+        let pixels = dib.pixels_mut();
+        if data.len() != pixels.len() {
+            return Err(AppError::msg(format!(
+                "像素数据长度不符: 期望 {} 实际 {}",
+                pixels.len(),
+                data.len()
+            )));
+        }
+        pixels.copy_from_slice(data);
+        Ok(dib)
+    }
+
     pub fn pixels(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.bits, self.len) }
     }

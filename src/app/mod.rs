@@ -1,19 +1,15 @@
 pub mod cli;
+pub mod hotkey;
 
-use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-
-use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-use windows::Win32::System::Threading::{
-    GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetGuiResources,
-};
 
 use crate::capture::{self, CaptureBackend, GdiBackend, RectI, VirtualScreen};
 use crate::output::{clipboard, files};
 use crate::platform::test_pattern::TestPattern;
 use crate::spike;
 use crate::util::error::{AppError, Result};
+use crate::util::resources::process_resources;
 
 pub fn run() -> Result<()> {
     let cli = cli::parse()?;
@@ -42,6 +38,18 @@ pub fn run() -> Result<()> {
         cli::Command::Spike(name) => {
             crate::util::log::init(cli.verbose)?;
             spike::run(&name)
+        }
+        cli::Command::Resident => {
+            crate::util::log::init(cli.verbose)?;
+            hotkey::run_resident()
+        }
+        cli::Command::Once => {
+            crate::util::log::init(cli.verbose)?;
+            hotkey::run_once()
+        }
+        cli::Command::OverlaySelftest(iterations) => {
+            crate::util::log::init(cli.verbose)?;
+            hotkey::run_overlay_selftest(iterations)
         }
     }
 }
@@ -180,22 +188,6 @@ fn soak(iterations: u32) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn process_resources() -> Result<(u32, u32, usize)> {
-    unsafe {
-        let process = GetCurrentProcess();
-        let gdi = GetGuiResources(process, GR_GDIOBJECTS);
-        let user = GetGuiResources(process, GR_USEROBJECTS);
-
-        let mut counters = PROCESS_MEMORY_COUNTERS {
-            cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-            ..Default::default()
-        };
-        GetProcessMemoryInfo(process, &mut counters, counters.cb)?;
-
-        Ok((gdi, user, counters.WorkingSetSize))
-    }
 }
 
 fn selftest() -> Result<()> {
