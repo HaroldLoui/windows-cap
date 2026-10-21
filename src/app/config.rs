@@ -8,6 +8,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
 
+use crate::capture::RectI;
 use crate::util::error::{AppError, Result};
 
 pub const DEFAULT_CAPTURE_HOTKEY: &str = "Ctrl+Alt+A";
@@ -34,6 +35,20 @@ pub struct HotkeyConfig {
 pub struct CaptureConfig {
     /// 截图前等待毫秒数（托盘“延迟截图”和 CLI `--delay` 使用）。
     pub delay_ms: u64,
+    /// 上次确认的选区（屏幕坐标 x, y, w, h），用于“按上次选区截图”。
+    pub last_region: Option<[i32; 4]>,
+}
+
+impl CaptureConfig {
+    pub fn last_rect(&self) -> Option<RectI> {
+        let [x, y, width, height] = self.last_region?;
+        let rect = RectI::new(x, y, width, height);
+        if rect.is_empty() { None } else { Some(rect) }
+    }
+
+    pub fn set_last_rect(&mut self, rect: RectI) {
+        self.last_region = Some([rect.x, rect.y, rect.width, rect.height]);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

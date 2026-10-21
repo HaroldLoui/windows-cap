@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
+use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VK_Q,
@@ -15,8 +16,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, KillTimer, MSG,
     PostQuitMessage, RegisterClassW, SW_HIDE, SetTimer, SetWindowLongPtrW, ShowWindow,
-    TranslateMessage, WINDOW_EX_STYLE, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_LBUTTONDBLCLK,
-    WM_LBUTTONUP, WM_NCCREATE, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    TranslateMessage, WINDOW_EX_STYLE, WM_CONTEXTMENU, WM_COPYDATA, WM_DESTROY, WM_HOTKEY,
+    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NCCREATE, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::w;
 
@@ -41,8 +42,10 @@ static CAPTURING: AtomicBool = AtomicBool::new(false);
 pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
     let single_instance = SingleInstance::acquire()?;
     if single_instance.already_running() {
-        let activated = single_instance::activate_existing();
-        if activated {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if !args.is_empty() && single_instance::forward_to_existing(&args) {
+            println!("已转交给运行中的 window-cap");
+        } else if single_instance::activate_existing() {
             println!("window-cap 已在运行");
         } else {
             eprintln!("window-cap 已在运行（未找到常驻窗口）");
@@ -144,7 +147,7 @@ pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
 /// 不走热键，直接执行一次截图流程（测试/脚本用）。
 pub fn run_once(config_path: Option<PathBuf>, delay_ms: u64) -> Result<()> {
     let path = Config::path(config_path.as_deref());
-    let (config, warning) = Config::load_or_create(&path);
+    let (mut config, warning) = Config::load_or_create(&path);
     if let Some(warning) = warning {
         eprintln!("配置: {warning}");
     }
@@ -156,6 +159,10 @@ pub fn run_once(config_path: Option<PathBuf>, delay_ms: u64) -> Result<()> {
 
     match capture_flow(None, &config)? {
         Some(outcome) => {
+            config.capture.set_last_rect(outcome.rect);
+            if let Err(error) = config.save(&path) {
+                eprintln!("保存上次选区失败: {error}");
+            }
             println!("{}", outcome.message());
             Ok(())
         }
@@ -263,6 +270,7 @@ pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
 struct CaptureOutcome {
     width: u32,
     height: u32,
+    rect: RectI,
     path: Option<PathBuf>,
     copied: bool,
 }
@@ -312,19 +320,8 @@ fn capture_flow(scripted: Option<RectI>, config: &Config) -> Result<Option<Captu
     )?;
 
     match result {
-        OverlayResult::Confirmed { image, rect: _ } => {
-            let mut copied = false;
-            if config.output.copy_to_clipboard {
-                clipboard::put(&image)?;
-                copied = true;
-            }
-
-            let mut path = None;
-            if config.output.save_file {
-                let target = files::path_in(&config.save_dir());
-                files::save_png(&image, &target)?;
-                path = Some(target);
-            }
+        OverlayResult::Confirmed { image, rect } => {
+            let (copied, path) = apply_outputs(&image, config)?;
 
             ::log::info!(
                 "capture ok {}x{} capture_ms={:.1} copied={} saved={}",
@@ -338,6 +335,7 @@ fn capture_flow(scripted: Option<RectI>, config: &Config) -> Result<Option<Captu
             Ok(Some(CaptureOutcome {
                 width: image.width,
                 height: image.height,
+                rect,
                 path,
                 copied,
             }))
@@ -347,6 +345,64 @@ fn capture_flow(scripted: Option<RectI>, config: &Config) -> Result<Option<Captu
             Ok(None)
         }
     }
+}
+
+fn apply_outputs(
+    image: &crate::capture::Frame,
+    config: &Config,
+) -> Result<(bool, Option<PathBuf>)> {
+    let mut copied = false;
+    if config.output.copy_to_clipboard {
+        clipboard::put(image)?;
+        copied = true;
+    }
+
+    let mut path = None;
+    if config.output.save_file {
+        let target = files::path_in(&config.save_dir());
+        files::save_png(image, &target)?;
+        path = Some(target);
+    }
+
+    Ok((copied, path))
+}
+
+/// 直接按给定区域截图（不走遮罩），用于“按上次选区截图”。
+fn capture_region(rect: RectI, config: &Config) -> Result<CaptureOutcome> {
+    let screen = VirtualScreen::current();
+    if !screen.contains(rect) {
+        return Err(AppError::msg(format!(
+            "区域 {rect} 超出虚拟桌面 {}x{} @ ({}, {})",
+            screen.width, screen.height, screen.x, screen.y
+        )));
+    }
+
+    let area = VirtualScreen {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    };
+    let mut backend = GdiBackend;
+    let frame = backend.capture(area)?;
+    let (copied, path) = apply_outputs(&frame, config)?;
+    ::log::info!(
+        "capture region {}x{} at ({}, {}) copied={} saved={}",
+        frame.width,
+        frame.height,
+        rect.x,
+        rect.y,
+        copied,
+        path.is_some()
+    );
+
+    Ok(CaptureOutcome {
+        width: frame.width,
+        height: frame.height,
+        rect,
+        path,
+        copied,
+    })
 }
 
 struct App {
@@ -427,7 +483,10 @@ impl App {
 
     fn do_capture(&mut self) {
         match capture_flow(None, &self.config) {
-            Ok(Some(outcome)) => self.notify(&outcome.message(), false),
+            Ok(Some(outcome)) => {
+                self.remember_region(outcome.rect);
+                self.notify(&outcome.message(), false);
+            }
             Ok(None) => {
                 ::log::info!("capture cancelled by user");
             }
@@ -435,6 +494,87 @@ impl App {
                 ::log::error!("capture failed: {error}");
                 self.notify(&format!("截图失败: {error}"), true);
             }
+        }
+    }
+
+    fn remember_region(&mut self, rect: RectI) {
+        self.config.capture.set_last_rect(rect);
+        if let Err(error) = self.config.save(&self.config_path) {
+            ::log::warn!("save last region failed: {error}");
+        }
+    }
+
+    fn capture_last_region(&mut self) {
+        let Some(rect) = self.config.capture.last_rect() else {
+            self.notify("还没有上次选区，先截图一次", true);
+            return;
+        };
+
+        match capture_region(rect, &self.config) {
+            Ok(outcome) => {
+                self.remember_region(outcome.rect);
+                self.notify(&outcome.message(), false);
+            }
+            Err(error) => {
+                ::log::error!("last region capture failed: {error}");
+                self.notify(&format!("截图失败: {error}"), true);
+            }
+        }
+    }
+
+    fn on_copy_data(&mut self, lparam: LPARAM) {
+        if lparam.0 == 0 {
+            return;
+        }
+        let data = lparam.0 as *const COPYDATASTRUCT;
+        let (magic, length, pointer) = unsafe {
+            (
+                (*data).dwData,
+                (*data).cbData as usize,
+                (*data).lpData as *const u16,
+            )
+        };
+        if magic != single_instance::FORWARD_MAGIC || length < 2 || pointer.is_null() {
+            return;
+        }
+
+        let words = length / 2;
+        let slice = unsafe { std::slice::from_raw_parts(pointer, words) };
+        let text = String::from_utf16_lossy(slice);
+        let text = text.trim_end_matches('\0');
+        let args: Vec<String> = text.split('\u{1f}').map(str::to_string).collect();
+        self.handle_forwarded(args);
+    }
+
+    fn handle_forwarded(&mut self, args: Vec<String>) {
+        ::log::info!("forwarded command: {args:?}");
+        let mut full = vec!["window-cap".to_string()];
+        full.extend(args);
+
+        match crate::app::cli::parse_from_args(full) {
+            Ok(parsed) => match parsed.command {
+                crate::app::cli::Command::Resident { .. } => {
+                    self.notify("window-cap 已在运行", false);
+                }
+                crate::app::cli::Command::Capture(options) => {
+                    if CAPTURING.swap(true, Ordering::SeqCst) {
+                        self.notify("截图进行中，已忽略转发请求", true);
+                        return;
+                    }
+                    ::log::info!("forwarded capture command");
+                    let result = crate::app::capture_command(options);
+                    CAPTURING.store(false, Ordering::SeqCst);
+                    match result {
+                        Ok(()) => self.notify("已执行转发的截图请求", false),
+                        Err(error) => {
+                            ::log::error!("forwarded capture failed: {error}");
+                            self.notify(&format!("转发的截图失败: {error}"), true);
+                        }
+                    }
+                }
+                _ => self.notify("只支持转发 --capture 命令", true),
+            },
+            Err(error) => self.notify(&format!("转发命令解析失败: {error}"), true),
         }
     }
 
@@ -450,10 +590,11 @@ impl App {
 
     fn show_menu(&mut self) {
         let autostart_enabled = autostart::is_enabled();
+        let last_region = self.config.capture.last_rect();
         let command = self
             .tray
             .as_ref()
-            .and_then(|tray| tray.show_menu(autostart_enabled, &self.capture_label));
+            .and_then(|tray| tray.show_menu(autostart_enabled, &self.capture_label, last_region));
 
         let Some(command) = command else {
             return;
@@ -462,6 +603,7 @@ impl App {
         match command {
             TrayCommand::Capture => self.start_capture(false),
             TrayCommand::DelayedCapture => self.start_capture(true),
+            TrayCommand::LastRegion => self.capture_last_region(),
             TrayCommand::ReloadConfig => self.reload_config(),
             TrayCommand::ToggleAutostart => self.toggle_autostart(),
             TrayCommand::OpenConfig => self.open_config(),
@@ -651,6 +793,12 @@ unsafe extern "system" fn hotkey_wndproc(
                     CAPTURING.store(false, Ordering::SeqCst);
                 }
                 LRESULT(0)
+            }
+            WM_COPYDATA => {
+                if let Some(app) = state(hwnd) {
+                    app.on_copy_data(lparam);
+                }
+                LRESULT(1)
             }
             WM_DESTROY => {
                 // 先移除托盘图标，再退出消息循环。

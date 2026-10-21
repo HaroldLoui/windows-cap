@@ -31,16 +31,28 @@ pub fn run() -> Result<()> {
     }
 }
 
-fn capture_command(options: cli::CaptureOptions) -> Result<()> {
+pub(crate) fn capture_command(options: cli::CaptureOptions) -> Result<()> {
     if options.delay_ms > 0 {
         println!("{} ms 后采集…", options.delay_ms);
         std::thread::sleep(Duration::from_millis(options.delay_ms));
     }
 
     let screen = VirtualScreen::current();
-    let rect = options
-        .region
-        .unwrap_or_else(|| RectI::new(screen.x, screen.y, screen.width, screen.height));
+    let rect = if options.last {
+        let path = config::Config::path(options.config.as_deref());
+        let (config, warning) = config::Config::load_or_create(&path);
+        if let Some(warning) = warning {
+            eprintln!("配置: {warning}");
+        }
+        config
+            .capture
+            .last_rect()
+            .ok_or_else(|| AppError::msg("还没有上次选区，请先执行一次截图"))?
+    } else {
+        options
+            .region
+            .unwrap_or_else(|| RectI::new(screen.x, screen.y, screen.width, screen.height))
+    };
 
     if !screen.contains(rect) {
         return Err(AppError::msg(format!(
@@ -111,7 +123,18 @@ fn capture_command(options: cli::CaptureOptions) -> Result<()> {
         }
     }
 
+    record_last_region(&options, rect);
+
     Ok(())
+}
+
+fn record_last_region(options: &cli::CaptureOptions, rect: RectI) {
+    let path = config::Config::path(options.config.as_deref());
+    let (mut config, _) = config::Config::load_or_create(&path);
+    config.capture.set_last_rect(rect);
+    if let Err(error) = config.save(&path) {
+        ::log::warn!("save last region failed: {error}");
+    }
 }
 
 fn json_escape(value: &str) -> String {

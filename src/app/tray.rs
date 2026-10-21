@@ -25,6 +25,7 @@ const TRAY_ID: u32 = 1;
 pub enum TrayCommand {
     Capture,
     DelayedCapture,
+    LastRegion,
     ReloadConfig,
     ToggleAutostart,
     OpenConfig,
@@ -36,10 +37,11 @@ impl TrayCommand {
         match self {
             Self::Capture => 1,
             Self::DelayedCapture => 2,
-            Self::ReloadConfig => 3,
-            Self::ToggleAutostart => 4,
-            Self::OpenConfig => 5,
-            Self::Quit => 6,
+            Self::LastRegion => 3,
+            Self::ReloadConfig => 4,
+            Self::ToggleAutostart => 5,
+            Self::OpenConfig => 6,
+            Self::Quit => 7,
         }
     }
 
@@ -47,10 +49,11 @@ impl TrayCommand {
         match id {
             1 => Some(Self::Capture),
             2 => Some(Self::DelayedCapture),
-            3 => Some(Self::ReloadConfig),
-            4 => Some(Self::ToggleAutostart),
-            5 => Some(Self::OpenConfig),
-            6 => Some(Self::Quit),
+            3 => Some(Self::LastRegion),
+            4 => Some(Self::ReloadConfig),
+            5 => Some(Self::ToggleAutostart),
+            6 => Some(Self::OpenConfig),
+            7 => Some(Self::Quit),
             _ => None,
         }
     }
@@ -123,9 +126,18 @@ impl Tray {
         }
     }
 
-    pub fn show_menu(&self, autostart: bool, capture_label: &str) -> Option<TrayCommand> {
+    pub fn show_menu(
+        &self,
+        autostart: bool,
+        capture_label: &str,
+        last_region: Option<crate::capture::RectI>,
+    ) -> Option<TrayCommand> {
         let menu = unsafe { CreatePopupMenu().ok()? };
         let capture_text = format!("截图    {capture_label}");
+        let last_text = match last_region {
+            Some(rect) => format!("上次选区截图    {}×{}", rect.width, rect.height),
+            None => "上次选区截图".to_string(),
+        };
 
         unsafe {
             append(menu, MF_STRING, TrayCommand::Capture.id(), &capture_text);
@@ -135,6 +147,7 @@ impl Tray {
                 TrayCommand::DelayedCapture.id(),
                 "延迟 3 秒截图",
             );
+            append(menu, MF_STRING, TrayCommand::LastRegion.id(), &last_text);
             append(menu, MF_SEPARATOR, 0, "");
             append(
                 menu,

@@ -43,6 +43,10 @@ pub struct Cli {
     #[arg(long)]
     pub clipboard: bool,
 
+    /// 配合 --capture：使用上次选区（无需遮罩）
+    #[arg(long)]
+    pub last: bool,
+
     /// 配合 --capture：以 JSON 输出结果
     #[arg(long)]
     pub json: bool,
@@ -111,11 +115,21 @@ pub struct CaptureOptions {
     pub clipboard: bool,
     pub json: bool,
     pub delay_ms: u64,
+    pub last: bool,
+    pub config: Option<PathBuf>,
 }
 
 /// 解析命令行；`--help` / `--version` 由 clap 直接打印并退出。
 pub fn parse() -> Parsed {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse_from(std::env::args_os()) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let code = if error.use_stderr() { 2 } else { 0 };
+            print!("{error}");
+            std::process::exit(code);
+        }
+    };
+
     let verbose = cli.verbose;
     let command = cli.into_command().unwrap_or_else(|error| {
         eprintln!("参数错误: {error}");
@@ -124,10 +138,25 @@ pub fn parse() -> Parsed {
     Parsed { verbose, command }
 }
 
+/// 从指定参数解析（第二实例转发时复用）。
+pub fn parse_from_args<I, T>(args: I) -> std::result::Result<Parsed, String>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let cli = Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+    let verbose = cli.verbose;
+    let command = cli.into_command().map_err(|error| error.to_string())?;
+    Ok(Parsed { verbose, command })
+}
+
 impl Cli {
     fn into_command(self) -> Result<Command> {
-        let capture_options_present =
-            self.region.is_some() || self.output.is_some() || self.clipboard || self.json;
+        let capture_options_present = self.region.is_some()
+            || self.output.is_some()
+            || self.clipboard
+            || self.json
+            || self.last;
 
         let modes = [
             self.hotkey,
@@ -153,6 +182,10 @@ impl Cli {
             return Err(AppError::msg(
                 "--region / --output / --clipboard / --json 只能与 --capture 一起使用",
             ));
+        }
+
+        if self.last && self.region.is_some() {
+            return Err(AppError::msg("--last 与 --region 不能同时使用"));
         }
 
         if let Some(action) = self.autostart {
@@ -189,6 +222,8 @@ impl Cli {
                 clipboard: self.clipboard,
                 json: self.json,
                 delay_ms: self.delay,
+                last: self.last,
+                config: self.config,
             }));
         }
         if self.delay > 0 {
@@ -229,5 +264,7 @@ mod tests {
         ));
         assert!(parsed(&["--once", "--selftest"]).is_err());
         assert!(parsed(&["--region", "1,2,3,4"]).is_ok());
+        assert!(parsed(&["--capture", "--last"]).is_ok());
+        assert!(parsed(&["--last", "--region", "1,2,3,4"]).is_err());
     }
 }
