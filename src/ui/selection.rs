@@ -115,6 +115,11 @@ impl SelectionState {
         !matches!(self.mode, Mode::Idle)
     }
 
+    /// 是否正在从零创建选区。
+    pub fn is_creating(&self) -> bool {
+        matches!(self.mode, Mode::Creating { .. })
+    }
+
     /// 正在绘制/生效的选区（创建过程中返回实时矩形）。
     pub fn current_rect(&self) -> Option<RectI> {
         match self.mode {

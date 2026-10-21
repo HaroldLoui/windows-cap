@@ -19,7 +19,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DestroyWindow, ES_AUTOVSCROLL, ES_MULTILINE, GWLP_WNDPROC,
     GetParent, GetWindowTextLengthW, GetWindowTextW, PostMessageW, SendMessageW, SetWindowLongPtrW,
-    WINDOW_STYLE, WM_APP, WM_KEYDOWN, WM_SETFONT, WNDPROC, WS_CHILD, WS_EX_CLIENTEDGE, WS_VISIBLE,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_KEYDOWN, WM_SETFONT, WNDPROC, WS_CHILD, WS_VISIBLE,
 };
 use windows::core::w;
 
@@ -39,22 +39,23 @@ pub struct TextEditor {
 }
 
 impl TextEditor {
-    /// 在遮罩客户端坐标 `client_position` 处创建输入框。
+    /// 在遮罩客户端坐标 `client_position` 处创建输入框，字号与最终文字一致。
     pub fn open(
         parent: HWND,
         client_position: (i32, i32),
         doc_position: (i32, i32),
         scale: f32,
+        font_size: f32,
     ) -> Result<Self> {
         let scale = scale.max(1.0);
-        let width = ((320.0 * scale).round() as i32).max(120);
-        let height = ((42.0 * scale).round() as i32).max(24);
-        let font_height = -((16.0 * scale).round() as i32).max(10);
+        let width = ((320.0 * scale).round() as i32).max(160);
+        let height = ((font_size * 1.8).round() as i32).max(28);
+        let font_height = -((font_size).round() as i32).max(10);
 
         unsafe {
             let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
             let edit = CreateWindowExW(
-                WS_EX_CLIENTEDGE,
+                WINDOW_EX_STYLE(0),
                 w!("EDIT"),
                 w!(""),
                 WS_CHILD | WS_VISIBLE | WINDOW_STYLE((ES_MULTILINE | ES_AUTOVSCROLL) as u32),

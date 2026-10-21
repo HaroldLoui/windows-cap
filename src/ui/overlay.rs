@@ -23,8 +23,8 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
     DEFAULT_CHARSET, DEFAULT_GUI_FONT, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
     DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FF_DONTCARE, FW_NORMAL, FillRect, FrameRect,
-    GetStockObject, HBRUSH, HFONT, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
-    SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
+    GetStockObject, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    SRCCOPY, SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -40,9 +40,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, HCURSOR, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IsWindow,
     KillTimer, LoadCursorW, MSG, PostThreadMessageW, RegisterClassW, SW_SHOW, SWP_SHOWWINDOW,
     SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, WM_APP, WM_CREATE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    TranslateMessage, WM_APP, WM_CREATE, WM_CTLCOLOREDIT, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST,
+    WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -81,7 +82,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
     let mut document = None;
     if let Some(rect) = options.scripted {
         selection.set_selection(rect);
-        document = Some(Document::new(&frame, rect)?);
+        document = Some(Document::from_frame(&frame, rect)?);
     }
 
     unsafe {
@@ -289,20 +290,52 @@ impl Overlay {
             return Ok(());
         };
 
-        let same_size = self
+        let same = self
             .document
             .as_ref()
             .map(|document| {
-                document.width() == rect.width as u32 && document.height() == rect.height as u32
+                document.width() == rect.width as u32
+                    && document.height() == rect.height as u32
+                    && document.origin() == (rect.x, rect.y)
             })
             .unwrap_or(false);
-        if !same_size {
-            if self.has_shapes() {
-                return Ok(());
-            }
-            self.document = Some(Document::new(&self.frame, rect)?);
+        if same {
+            return Ok(());
         }
+        if self.has_shapes() {
+            return Ok(());
+        }
+        self.document = Some(Document::from_frame(&self.frame, rect)?);
         Ok(())
+    }
+
+    /// 选区移动/缩放过程中持续重裁底图，保证内容跟着画面走而不是跟着边框走。
+    fn sync_document(&mut self, rect: RectI) {
+        if self.has_shapes() {
+            return;
+        }
+        let same = self
+            .document
+            .as_ref()
+            .map(|document| {
+                document.width() == rect.width as u32
+                    && document.height() == rect.height as u32
+                    && document.origin() == (rect.x, rect.y)
+            })
+            .unwrap_or(false);
+        if same {
+            return;
+        }
+
+        let result = match self.document.as_mut() {
+            Some(document) => document.recrop(&self.frame, rect),
+            None => Document::from_frame(&self.frame, rect).map(|document| {
+                self.document = Some(document);
+            }),
+        };
+        if let Err(error) = result {
+            ::log::error!("重新裁剪文档失败: {error}");
+        }
     }
 
     fn refresh_toolbar(&mut self) {
@@ -440,14 +473,18 @@ impl Overlay {
             };
             let local = self.to_local(current);
 
-            if let (Some(rect), Some(document)) = (self.selection.rect(), &self.document) {
-                let selection_local = self.to_local(rect);
+            // 选区内容贴文档表面（底图 + 标注）；文档始终与选区位置一致。
+            if let (Some(_), Some(document)) = (self.selection.rect(), &self.document)
+                && document.width() == current.width as u32
+                && document.height() == current.height as u32
+                && document.origin() == (current.x, current.y)
+            {
                 let _ = BitBlt(
                     hdc,
-                    selection_local.x,
-                    selection_local.y,
-                    rect.width,
-                    rect.height,
+                    local.x,
+                    local.y,
+                    current.width,
+                    current.height,
                     Some(document.surface().dc),
                     0,
                     0,
@@ -713,7 +750,13 @@ impl Overlay {
 
         if self.tool == Tool::Text {
             let client = (screen.0 - self.area.x, screen.1 - self.area.y);
-            match TextEditor::open(self.hwnd, client, position, self.ui_scale) {
+            match TextEditor::open(
+                self.hwnd,
+                client,
+                position,
+                self.ui_scale,
+                24.0 * self.ui_scale,
+            ) {
                 Ok(editor) => {
                     let edit_hwnd = editor.hwnd;
                     self.text_editor = Some(editor);
@@ -874,6 +917,11 @@ impl Overlay {
             self.invalidate();
         } else if self.selection.is_active() {
             self.selection.update(screen.0, screen.1, self.area);
+            if !self.selection.is_creating()
+                && let Some(rect) = self.selection.rect()
+            {
+                self.sync_document(rect);
+            }
             self.invalidate();
         }
 
@@ -1121,6 +1169,13 @@ fn inside(rect: RectI, point: (i32, i32)) -> bool {
         && point.1 < rect.y + rect.height
 }
 
+fn argb_to_colorref(argb: u32) -> COLORREF {
+    let r = (argb >> 16) & 0xFF;
+    let g = (argb >> 8) & 0xFF;
+    let b = argb & 0xFF;
+    COLORREF((b << 16) | (g << 8) | r)
+}
+
 fn loword(value: isize) -> i32 {
     ((value as usize) & 0xFFFF) as u16 as i16 as i32
 }
@@ -1234,6 +1289,15 @@ unsafe extern "system" fn overlay_wndproc(
             WM_TEXT_CANCEL => {
                 if let Some(overlay) = state(hwnd) {
                     overlay.cancel_text();
+                }
+                LRESULT(0)
+            }
+            WM_CTLCOLOREDIT => {
+                if let Some(overlay) = state(hwnd) {
+                    let hdc = HDC(wparam.0 as *mut c_void);
+                    let _ = SetTextColor(hdc, argb_to_colorref(overlay.color));
+                    let _ = SetBkColor(hdc, COLORREF(0x0020_2020));
+                    return LRESULT(overlay.dark.0 as isize);
                 }
                 LRESULT(0)
             }
