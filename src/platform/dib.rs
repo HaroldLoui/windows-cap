@@ -12,6 +12,8 @@ use crate::util::error::{AppError, Result};
 /// 一块可读写的 32bpp 自顶向下 DIB，配套一个内存 DC。
 pub struct Dib {
     pub dc: HDC,
+    pub width: u32,
+    pub height: u32,
     hbm: HBITMAP,
     old: HGDIOBJ,
     bits: *mut u8,
@@ -57,6 +59,8 @@ impl Dib {
             let old = SelectObject(dc, HGDIOBJ(hbm.0));
             Ok(Self {
                 dc,
+                width,
+                height,
                 hbm,
                 old,
                 bits: bits as *mut u8,

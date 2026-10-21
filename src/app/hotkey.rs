@@ -143,7 +143,7 @@ pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
     for _ in 0..warmup {
         let frame = backend.capture(screen)?;
         let _ = ui::select(
-            &frame,
+            frame,
             screen,
             OverlayOptions {
                 scripted: Some(rect),
@@ -159,17 +159,25 @@ pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
     for index in 0..iterations {
         let frame = backend.capture(screen)?;
         match ui::select(
-            &frame,
+            frame,
             screen,
             OverlayOptions {
                 scripted: Some(rect),
                 script_delay_ms: 40,
             },
         )? {
-            OverlayResult::Confirmed(selected) if selected == rect => confirmed += 1,
-            other => {
+            OverlayResult::Confirmed {
+                image,
+                rect: selected,
+            } if selected == rect
+                && image.width == rect.width as u32
+                && image.height == rect.height as u32 =>
+            {
+                confirmed += 1;
+            }
+            _ => {
                 return Err(AppError::msg(format!(
-                    "第 {} 次脚本化选区结果异常: {other:?}",
+                    "第 {} 次脚本化选区结果异常",
                     index + 1
                 )));
             }
@@ -218,7 +226,7 @@ fn capture_flow(scripted: Option<RectI>) -> Result<Option<RectI>> {
     let capture_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     let result = ui::select(
-        &frame,
+        frame,
         screen,
         OverlayOptions {
             scripted,
@@ -227,21 +235,20 @@ fn capture_flow(scripted: Option<RectI>) -> Result<Option<RectI>> {
     )?;
 
     match result {
-        OverlayResult::Confirmed(rect) => {
-            let cropped = frame.crop(rect)?;
-            clipboard::put(&cropped)?;
+        OverlayResult::Confirmed { image, rect } => {
+            clipboard::put(&image)?;
             let path = files::default_path();
-            files::save_png(&cropped, &path)?;
+            files::save_png(&image, &path)?;
             println!(
                 "已复制 {}×{} 到剪贴板，保存到 {}",
-                cropped.width,
-                cropped.height,
+                image.width,
+                image.height,
                 path.display()
             );
             ::log::info!(
                 "capture ok {}x{} capture_ms={:.1}",
-                cropped.width,
-                cropped.height,
+                image.width,
+                image.height,
                 capture_ms
             );
             Ok(Some(rect))

@@ -1,13 +1,16 @@
-//! 全屏遮罩窗口：冻结帧 + 压暗 + 选区 + 手柄 + 尺寸标签。
+//! 全屏遮罩：冻结帧、选区、标注、工具栏。
 //!
-//! 交互（P2）：
-//! - 拖拽创建选区；松手后保留，可继续移动/缩放
-//! - `Enter` / `Ctrl+C` / 双击：确认（复制 + 保存）
-//! - `Esc` / 右键：取消
-//! - 方向键移动 1px，`Shift` + 方向键缩放
-//! - 空白处单击（未拖动且无选区）：取消遮罩
+//! 渲染方式（P3）：所有内容先合成到一块全屏 DIB（压暗背景 + 选区内容 + 预览 +
+//! chrome + 工具栏），再一次性 `BitBlt` 到窗口，避免逐层贴图造成的闪烁。
 //!
-//! P3 会在此基础上加入标注层与工具栏。
+//! 交互：
+//! - 拖拽创建选区；松手后保留，可继续移动/缩放（画出标注后锁定选区）
+//! - 工具：选择 / 画笔 / 直线 / 箭头 / 矩形 / 椭圆 / 文字 / 马赛克 / 序号
+//! - `Enter` / `Ctrl+C` / `Ctrl+S` / 双击：确认（复制 + 保存）
+//! - `Esc` / 右键 / 空白单击：取消
+//! - `Ctrl+Z` / `Ctrl+Y`：撤销/重做
+//! - 方向键移动选区，`Shift` + 方向键缩放（无标注时）
+//! - 文字工具用系统 `EDIT` 子窗口，支持中文 IME（回车提交、Shift+回车换行、Esc 取消）
 
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -20,16 +23,16 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
     DEFAULT_CHARSET, DEFAULT_GUI_FONT, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
     DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FF_DONTCARE, FW_NORMAL, FillRect, FrameRect,
-    GetStockObject, HBRUSH, HFONT, HGDIOBJ, IntersectClipRect, InvalidateRect, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, RestoreDC, SRCCOPY, SaveDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
-    UpdateWindow,
+    GetStockObject, HBRUSH, HFONT, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::Ime::{HIMC, ImmAssociateContext, ImmGetVirtualKey};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT,
-    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_UP,
+    VK_PROCESSKEY, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
@@ -43,9 +46,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
+use crate::annotate::{Document, Point, Shape, ShapeKind, render};
 use crate::capture::{Frame, RectI, VirtualScreen};
 use crate::platform::dib::Dib;
 use crate::ui::selection::{EndResult, Handle, SelectionState};
+use crate::ui::text_edit::{TextEditor, WM_TEXT_CANCEL, WM_TEXT_COMMIT};
+use crate::ui::toolbar::{COLORS, TOOLS, Tool, Toolbar, ToolbarAction, ToolbarState};
 use crate::util::error::Result;
 
 const CLASS_NAME: PCWSTR = w!("window_cap_overlay");
@@ -61,24 +67,21 @@ pub struct OverlayOptions {
 }
 
 /// 遮罩结果。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlayResult {
-    Confirmed(RectI),
+    Confirmed { image: Frame, rect: RectI },
     Cancelled,
 }
 
-pub fn select(
-    frame: &Frame,
-    area: VirtualScreen,
-    options: OverlayOptions,
-) -> Result<OverlayResult> {
+pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Result<OverlayResult> {
     let dimmed = dim_bgra(&frame.bgra);
-    let bright = Dib::from_bgra(frame.width, frame.height, &frame.bgra)?;
     let dim = Dib::from_bgra(frame.width, frame.height, &dimmed)?;
+    let composed = Dib::new(area.width as u32, area.height as u32)?;
 
-    let mut state = SelectionState::new();
+    let mut selection = SelectionState::new();
+    let mut document = None;
     if let Some(rect) = options.scripted {
-        state.set_selection(rect);
+        selection.set_selection(rect);
+        document = Some(Document::new(&frame, rect)?);
     }
 
     unsafe {
@@ -97,9 +100,17 @@ pub fn select(
         let mut overlay = Box::new(Overlay {
             hwnd: HWND(null_mut()),
             area,
-            bright,
+            frame,
             dim,
-            state,
+            composed,
+            document,
+            selection,
+            tool: Tool::Select,
+            color: COLORS[0],
+            width: 4.0,
+            drag: None,
+            text_editor: None,
+            toolbar: None,
             result: None,
             cross,
             arrow,
@@ -140,8 +151,12 @@ pub fn select(
         overlay.hwnd = hwnd;
         overlay.ui_scale = (GetDpiForWindow(hwnd) as f32 / 96.0).max(1.0);
         overlay.font = create_font(overlay.ui_scale);
+        overlay.refresh_toolbar();
 
-        // 禁用 DWM 淡入，避免遮罩出现时闪一下。
+        // 遮罩本身不需要输入法：禁用它，否则按键会变成 VK_PROCESSKEY。
+        // 文字工具会为自己的 EDIT 单独创建 IME 上下文。
+        let _ = ImmAssociateContext(hwnd, HIMC(null_mut()));
+
         let transitions_disabled: i32 = 1;
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -200,10 +215,9 @@ pub fn select(
         }
 
         ::log::info!(
-            "overlay closed: result={:?} first_paint_ms={:?} paints={} avg_paint_ms={:.1}",
-            result,
-            overlay.first_paint_ms,
+            "overlay closed: paints={} first_paint_ms={:?} avg_paint_ms={:.1}",
             paints,
+            overlay.first_paint_ms,
             average_paint_ms
         );
 
@@ -212,12 +226,26 @@ pub fn select(
     }
 }
 
+struct ShapeDrag {
+    start: Point,
+    current: Point,
+    points: Vec<Point>,
+}
+
 struct Overlay {
     hwnd: HWND,
     area: VirtualScreen,
-    bright: Dib,
+    frame: Frame,
     dim: Dib,
-    state: SelectionState,
+    composed: Dib,
+    document: Option<Document>,
+    selection: SelectionState,
+    tool: Tool,
+    color: u32,
+    width: f32,
+    drag: Option<ShapeDrag>,
+    text_editor: Option<TextEditor>,
+    toolbar: Option<Toolbar>,
     result: Option<OverlayResult>,
     cross: HCURSOR,
     arrow: HCURSOR,
@@ -248,19 +276,84 @@ impl Overlay {
         )
     }
 
+    fn has_shapes(&self) -> bool {
+        self.document
+            .as_ref()
+            .map(|document| document.has_shapes())
+            .unwrap_or(false)
+    }
+
+    fn setup_document(&mut self) -> Result<()> {
+        let Some(rect) = self.selection.rect() else {
+            self.document = None;
+            return Ok(());
+        };
+
+        let same_size = self
+            .document
+            .as_ref()
+            .map(|document| {
+                document.width() == rect.width as u32 && document.height() == rect.height as u32
+            })
+            .unwrap_or(false);
+        if !same_size {
+            if self.has_shapes() {
+                return Ok(());
+            }
+            self.document = Some(Document::new(&self.frame, rect)?);
+        }
+        Ok(())
+    }
+
+    fn refresh_toolbar(&mut self) {
+        self.toolbar = self.selection.rect().map(|rect| {
+            let state = ToolbarState {
+                tool: self.tool,
+                color: self.color,
+                width: self.width,
+                can_undo: self
+                    .document
+                    .as_ref()
+                    .map(|document| document.can_undo())
+                    .unwrap_or(false),
+                can_redo: self
+                    .document
+                    .as_ref()
+                    .map(|document| document.can_redo())
+                    .unwrap_or(false),
+            };
+            Toolbar::layout(rect, self.area, self.ui_scale, &state)
+        });
+    }
+
     fn confirm(&mut self) {
         if self.result.is_some() {
             return;
         }
-        let rect = self.state.rect().unwrap_or_else(|| self.area_rect());
-        ::log::debug!("overlay confirm rect={rect:?}");
-        if rect.is_empty() {
-            return;
-        }
-        self.finish(OverlayResult::Confirmed(rect));
+        self.close_text_editor();
+
+        let selection = self.selection.rect();
+        let rect = selection.unwrap_or_else(|| self.area_rect());
+        ::log::debug!(
+            "confirm rect={rect:?} has_document={}",
+            self.document.is_some()
+        );
+        let image = match (&self.document, selection) {
+            (Some(document), Some(_)) => document.export_frame((rect.x, rect.y)),
+            _ => match self.frame.crop(rect) {
+                Ok(image) => image,
+                Err(error) => {
+                    ::log::error!("导出失败: {error}");
+                    self.cancel();
+                    return;
+                }
+            },
+        };
+        self.finish(OverlayResult::Confirmed { image, rect });
     }
 
     fn cancel(&mut self) {
+        self.close_text_editor();
         self.finish(OverlayResult::Cancelled);
     }
 
@@ -268,11 +361,125 @@ impl Overlay {
         if self.result.is_some() {
             return;
         }
+        if let Some(editor) = self.text_editor.take() {
+            drop(editor);
+        }
         self.result = Some(result);
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_SCRIPT);
             let _ = DestroyWindow(self.hwnd);
             let _ = PostThreadMessageW(GetCurrentThreadId(), WM_FINISHED, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    fn close_text_editor(&mut self) {
+        if let Some(editor) = self.text_editor.take() {
+            drop(editor);
+            unsafe {
+                let _ = SetFocus(Some(self.hwnd));
+            }
+        }
+    }
+
+    fn commit_text(&mut self) {
+        let Some(editor) = self.text_editor.take() else {
+            return;
+        };
+        let text = editor.text();
+        let position = editor.doc_position;
+        drop(editor);
+
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            let shape = Shape::new(
+                ShapeKind::Text {
+                    pos: (position.0, position.1),
+                    text,
+                    size: 24.0 * self.ui_scale,
+                },
+                self.color,
+                self.width,
+            );
+            if let Some(document) = self.document.as_mut()
+                && let Err(error) = document.add(shape)
+            {
+                ::log::error!("添加文字失败: {error}");
+            }
+        }
+
+        unsafe {
+            let _ = SetFocus(Some(self.hwnd));
+        }
+        self.refresh_toolbar();
+        self.invalidate();
+    }
+
+    fn cancel_text(&mut self) {
+        self.close_text_editor();
+        self.invalidate();
+    }
+
+    fn compose(&self) {
+        unsafe {
+            let hdc = self.composed.dc;
+            let _ = BitBlt(
+                hdc,
+                0,
+                0,
+                self.area.width,
+                self.area.height,
+                Some(self.dim.dc),
+                0,
+                0,
+                SRCCOPY,
+            );
+
+            let Some(current) = self.selection.current_rect() else {
+                self.draw_hint(hdc);
+                return;
+            };
+            let local = self.to_local(current);
+
+            if let (Some(rect), Some(document)) = (self.selection.rect(), &self.document) {
+                let selection_local = self.to_local(rect);
+                let _ = BitBlt(
+                    hdc,
+                    selection_local.x,
+                    selection_local.y,
+                    rect.width,
+                    rect.height,
+                    Some(document.surface().dc),
+                    0,
+                    0,
+                    SRCCOPY,
+                );
+            }
+
+            if let Some(drag) = &self.drag
+                && let Some(shape) = self.preview_shape(drag)
+            {
+                match &shape.kind {
+                    ShapeKind::Mosaic { .. } => {
+                        let outline = Shape::new(
+                            ShapeKind::Rect {
+                                a: drag.start,
+                                b: drag.current,
+                            },
+                            0xFFFF_FFFF,
+                            self.width.max(1.0),
+                        );
+                        let _ = render::draw_vector(hdc, &outline, (local.x, local.y));
+                    }
+                    _ => {
+                        let _ = render::draw_vector(hdc, &shape, (local.x, local.y));
+                    }
+                }
+            }
+
+            self.draw_chrome(hdc, current);
+            if let Some(toolbar) = &self.toolbar {
+                toolbar.paint(hdc, self.font);
+            }
         }
     }
 
@@ -284,39 +491,19 @@ impl Overlay {
                 return;
             }
             let started = Instant::now();
-            let width = self.area.width;
-            let height = self.area.height;
 
-            let saved = SaveDC(hdc);
-            let _ = BitBlt(hdc, 0, 0, width, height, Some(self.dim.dc), 0, 0, SRCCOPY);
-
-            if let Some(rect) = self.state.current_rect() {
-                let local = self.to_local(rect);
-                let _ = IntersectClipRect(
-                    hdc,
-                    local.x,
-                    local.y,
-                    local.x + local.width,
-                    local.y + local.height,
-                );
-                let _ = BitBlt(
-                    hdc,
-                    0,
-                    0,
-                    width,
-                    height,
-                    Some(self.bright.dc),
-                    0,
-                    0,
-                    SRCCOPY,
-                );
-            }
-            let _ = RestoreDC(hdc, saved);
-
-            match self.state.current_rect() {
-                Some(rect) => self.draw_frame(hdc, rect),
-                None => self.draw_hint(hdc),
-            }
+            self.compose();
+            let _ = BitBlt(
+                hdc,
+                0,
+                0,
+                self.area.width,
+                self.area.height,
+                Some(self.composed.dc),
+                0,
+                0,
+                SRCCOPY,
+            );
 
             let _ = EndPaint(self.hwnd, &paint);
 
@@ -332,7 +519,7 @@ impl Overlay {
         }
     }
 
-    unsafe fn draw_frame(&self, hdc: windows::Win32::Graphics::Gdi::HDC, rect: RectI) {
+    unsafe fn draw_chrome(&self, hdc: windows::Win32::Graphics::Gdi::HDC, rect: RectI) {
         unsafe {
             let local = self.to_local(rect);
             let thickness = ((2.0 * self.ui_scale).round() as i32).max(1);
@@ -356,18 +543,20 @@ impl Overlay {
                 self.accent,
             );
 
-            let half = ((3.5 * self.ui_scale).round() as i32).max(2);
-            for handle in Handle::ALL {
-                let (x, y) = handle.position(rect);
-                let (x, y) = (x - self.area.x, y - self.area.y);
-                let handle_rect = windows::Win32::Foundation::RECT {
-                    left: x - half,
-                    top: y - half,
-                    right: x + half,
-                    bottom: y + half,
-                };
-                let _ = FillRect(hdc, &handle_rect, self.white);
-                let _ = FrameRect(hdc, &handle_rect, self.accent);
+            if !self.has_shapes() {
+                let half = ((3.5 * self.ui_scale).round() as i32).max(2);
+                for handle in Handle::ALL {
+                    let (x, y) = handle.position(rect);
+                    let (x, y) = (x - self.area.x, y - self.area.y);
+                    let handle_rect = windows::Win32::Foundation::RECT {
+                        left: x - half,
+                        top: y - half,
+                        right: x + half,
+                        bottom: y + half,
+                    };
+                    let _ = FillRect(hdc, &handle_rect, self.white);
+                    let _ = FrameRect(hdc, &handle_rect, self.accent);
+                }
             }
 
             let label = format!("{} × {}", rect.width, rect.height);
@@ -444,66 +633,384 @@ impl Overlay {
         )
     }
 
+    fn doc_point(&self, screen: (i32, i32)) -> Option<Point> {
+        let rect = self.selection.rect()?;
+        Some((screen.0 - rect.x, screen.1 - rect.y))
+    }
+
+    fn preview_shape(&self, drag: &ShapeDrag) -> Option<Shape> {
+        let moved =
+            (drag.current.0 - drag.start.0).abs() + (drag.current.1 - drag.start.1).abs() >= 2;
+
+        let kind = match self.tool {
+            Tool::Pen => {
+                if drag.points.len() >= 2 {
+                    Some(ShapeKind::Pen {
+                        points: drag.points.clone(),
+                    })
+                } else {
+                    None
+                }
+            }
+            Tool::Highlight => {
+                if drag.points.len() >= 2 {
+                    Some(ShapeKind::Highlight {
+                        points: drag.points.clone(),
+                    })
+                } else {
+                    None
+                }
+            }
+            Tool::Line if moved => Some(ShapeKind::Line {
+                a: drag.start,
+                b: drag.current,
+            }),
+            Tool::Arrow if moved => Some(ShapeKind::Arrow {
+                a: drag.start,
+                b: drag.current,
+            }),
+            Tool::Rect if moved => Some(ShapeKind::Rect {
+                a: drag.start,
+                b: drag.current,
+            }),
+            Tool::Ellipse if moved => Some(ShapeKind::Ellipse {
+                a: drag.start,
+                b: drag.current,
+            }),
+            Tool::Mosaic if moved => Some(ShapeKind::Mosaic {
+                a: drag.start,
+                b: drag.current,
+                block: 12,
+            }),
+            Tool::Step => Some(ShapeKind::Step {
+                center: drag.current,
+                index: self
+                    .document
+                    .as_ref()
+                    .map(|document| document.next_step_index())
+                    .unwrap_or(1),
+            }),
+            _ => None,
+        }?;
+
+        let width = match self.tool {
+            Tool::Highlight => self.width * 4.0,
+            Tool::Mosaic => 1.0,
+            _ => self.width,
+        };
+        let color = if matches!(self.tool, Tool::Highlight) {
+            (self.color & 0x00FF_FFFF) | 0x80_000000
+        } else {
+            self.color
+        };
+        Some(Shape::new(kind, color, width))
+    }
+
+    fn start_drag(&mut self, screen: (i32, i32)) {
+        let Some(position) = self.doc_point(screen) else {
+            return;
+        };
+
+        if self.tool == Tool::Text {
+            let client = (screen.0 - self.area.x, screen.1 - self.area.y);
+            match TextEditor::open(self.hwnd, client, position, self.ui_scale) {
+                Ok(editor) => {
+                    let edit_hwnd = editor.hwnd;
+                    self.text_editor = Some(editor);
+                    unsafe {
+                        let _ = SetFocus(Some(edit_hwnd));
+                    }
+                }
+                Err(error) => {
+                    ::log::error!("创建文字输入框失败: {error}");
+                }
+            }
+            return;
+        }
+
+        self.drag = Some(ShapeDrag {
+            start: position,
+            current: position,
+            points: vec![position],
+        });
+        ::log::debug!("start drag tool={:?} at {position:?}", self.tool);
+        unsafe {
+            SetCapture(self.hwnd);
+        }
+        self.invalidate();
+    }
+
+    fn update_drag(&mut self, screen: (i32, i32)) {
+        let Some(rect) = self.selection.rect() else {
+            return;
+        };
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
+
+        drag.current = (screen.0 - rect.x, screen.1 - rect.y);
+        if matches!(self.tool, Tool::Pen | Tool::Highlight) {
+            let should_push = drag
+                .points
+                .last()
+                .map(|last| (last.0 - drag.current.0).abs() + (last.1 - drag.current.1).abs() >= 2)
+                .unwrap_or(true);
+            if should_push {
+                drag.points.push(drag.current);
+            }
+        }
+    }
+
+    fn finish_drag(&mut self) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+
+        if let Some(shape) = self.preview_shape(&drag)
+            && let Some(document) = self.document.as_mut()
+            && let Err(error) = document.add(shape)
+        {
+            ::log::error!("添加标注失败: {error}");
+        }
+        ::log::debug!("finish drag tool={:?}", self.tool);
+
+        self.refresh_toolbar();
+        self.invalidate();
+    }
+
+    fn apply_action(&mut self, action: ToolbarAction) {
+        match action {
+            ToolbarAction::Tool(tool) => self.tool = tool,
+            ToolbarAction::Color(color) => self.color = color,
+            ToolbarAction::Width(delta) => {
+                self.width = (self.width + delta as f32).clamp(1.0, 40.0);
+            }
+            ToolbarAction::Undo => {
+                if let Some(document) = self.document.as_mut() {
+                    document.undo();
+                }
+            }
+            ToolbarAction::Redo => {
+                if let Some(document) = self.document.as_mut() {
+                    document.redo();
+                }
+            }
+            ToolbarAction::Copy | ToolbarAction::Save => {
+                self.confirm();
+                return;
+            }
+            ToolbarAction::Cancel => {
+                self.cancel();
+                return;
+            }
+            ToolbarAction::Noop => {}
+        }
+
+        self.refresh_toolbar();
+        self.invalidate();
+    }
+
+    fn on_mouse_down(&mut self, screen: (i32, i32)) {
+        if self.text_editor.is_some() {
+            return;
+        }
+        ::log::debug!(
+            "mouse down {screen:?} tool={:?} selection={:?} shapes={}",
+            self.tool,
+            self.selection.rect(),
+            self.has_shapes()
+        );
+
+        let client = (screen.0 - self.area.x, screen.1 - self.area.y);
+        let action = self
+            .toolbar
+            .as_ref()
+            .and_then(|toolbar| toolbar.hit(client.0, client.1));
+        if let Some(action) = action {
+            ::log::debug!("toolbar action {action:?}");
+            self.apply_action(action);
+            return;
+        }
+
+        if let Some(rect) = self.selection.rect() {
+            if inside(rect, screen) {
+                if self.has_shapes() || self.tool != Tool::Select {
+                    self.start_drag(screen);
+                } else {
+                    self.selection.begin(screen.0, screen.1, self.area);
+                    unsafe {
+                        SetCapture(self.hwnd);
+                    }
+                    self.invalidate();
+                }
+                return;
+            }
+
+            if !self.has_shapes() {
+                self.selection.begin(screen.0, screen.1, self.area);
+                unsafe {
+                    SetCapture(self.hwnd);
+                }
+                self.invalidate();
+            }
+            return;
+        }
+
+        self.selection.begin(screen.0, screen.1, self.area);
+        unsafe {
+            SetCapture(self.hwnd);
+        }
+        self.invalidate();
+    }
+
+    fn on_mouse_move(&mut self, screen: (i32, i32)) {
+        self.cursor = screen;
+
+        if self.drag.is_some() {
+            self.update_drag(screen);
+            self.invalidate();
+        } else if self.selection.is_active() {
+            self.selection.update(screen.0, screen.1, self.area);
+            self.invalidate();
+        }
+
+        if let Some(rect) = self.selection.rect()
+            && self.has_shapes()
+        {
+            let cursor = if inside(rect, screen) {
+                self.cross
+            } else {
+                self.arrow
+            };
+            unsafe {
+                let _ = SetCursor(Some(cursor));
+            }
+            return;
+        }
+        self.update_cursor();
+    }
+
+    fn on_mouse_up(&mut self, screen: (i32, i32)) {
+        if self.drag.is_some() {
+            self.update_drag(screen);
+            self.finish_drag();
+            return;
+        }
+
+        if self.selection.is_active() {
+            self.selection.update(screen.0, screen.1, self.area);
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            let end = self.selection.end(self.area);
+            ::log::debug!(
+                "mouse up {screen:?} end={end:?} rect={:?}",
+                self.selection.rect()
+            );
+            match end {
+                EndResult::Cancelled => self.cancel(),
+                _ => {
+                    if let Err(error) = self.setup_document() {
+                        ::log::error!("创建标注文档失败: {error}");
+                    }
+                    self.refresh_toolbar();
+                    self.invalidate();
+                }
+            }
+        }
+    }
+
     fn handle_key(&mut self, wparam: WPARAM) {
-        let key = wparam.0 as u16;
+        if self.text_editor.is_some() {
+            return;
+        }
+
+        let mut key = wparam.0 as u16;
+        // 有 IME 时 WM_KEYDOWN 的键码是 VK_PROCESSKEY，用 ImmGetVirtualKey 还原真实按键。
+        if key == VK_PROCESSKEY.0 {
+            key = unsafe { ImmGetVirtualKey(self.hwnd) } as u16;
+        }
         let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
         let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+        ::log::debug!("key down {key:#06x} ctrl={ctrl} shift={shift}");
 
-        let mut changed = false;
+        if ctrl {
+            match key {
+                key if key == b'C' as u16 || key == b'S' as u16 => self.confirm(),
+                key if key == b'Z' as u16 => {
+                    if shift {
+                        if let Some(document) = self.document.as_mut() {
+                            document.redo();
+                        }
+                    } else if let Some(document) = self.document.as_mut() {
+                        document.undo();
+                    }
+                    self.refresh_toolbar();
+                    self.invalidate();
+                }
+                key if key == b'Y' as u16 => {
+                    if let Some(document) = self.document.as_mut() {
+                        document.redo();
+                    }
+                    self.refresh_toolbar();
+                    self.invalidate();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key {
             key if key == VK_ESCAPE.0 => self.cancel(),
             key if key == VK_RETURN.0 => self.confirm(),
-            key if key == b'C' as u16 && ctrl => self.confirm(),
-            key if key == b'S' as u16 && ctrl => self.confirm(),
-            key if key == VK_LEFT.0 => {
-                self.arrow(-1, 0, shift);
-                changed = true;
+            key if key == VK_LEFT.0 => self.nudge(-1, 0, shift),
+            key if key == VK_RIGHT.0 => self.nudge(1, 0, shift),
+            key if key == VK_UP.0 => self.nudge(0, -1, shift),
+            key if key == VK_DOWN.0 => self.nudge(0, 1, shift),
+            key if key == b'[' as u16 => {
+                self.width = (self.width - 1.0).max(1.0);
+                self.refresh_toolbar();
+                self.invalidate();
             }
-            key if key == VK_RIGHT.0 => {
-                self.arrow(1, 0, shift);
-                changed = true;
+            key if key == b']' as u16 => {
+                self.width = (self.width + 1.0).min(40.0);
+                self.refresh_toolbar();
+                self.invalidate();
             }
-            key if key == VK_UP.0 => {
-                self.arrow(0, -1, shift);
-                changed = true;
-            }
-            key if key == VK_DOWN.0 => {
-                self.arrow(0, 1, shift);
-                changed = true;
+            key if TOOLS.iter().any(|tool| tool.shortcut() == key) => {
+                if let Some(tool) = TOOLS.iter().find(|tool| tool.shortcut() == key) {
+                    self.tool = *tool;
+                    self.refresh_toolbar();
+                    self.invalidate();
+                }
             }
             _ => {}
         }
-
-        if changed {
-            unsafe {
-                let _ = InvalidateRect(Some(self.hwnd), None, false);
-            }
-        }
     }
 
-    fn arrow(&mut self, dx: i32, dy: i32, resize: bool) {
-        if resize {
-            self.state.resize_by(dx, dy, self.area);
-        } else {
-            self.state.move_by(dx, dy, self.area);
+    fn nudge(&mut self, dx: i32, dy: i32, resize: bool) {
+        if self.has_shapes() {
+            return;
         }
+        if resize {
+            self.selection.resize_by(dx, dy, self.area);
+        } else {
+            self.selection.move_by(dx, dy, self.area);
+        }
+        self.invalidate();
     }
 
     fn update_cursor(&self) {
-        let over_selection = match self.state.rect() {
-            Some(rect) => {
-                self.cursor.0 >= rect.x
-                    && self.cursor.1 >= rect.y
-                    && self.cursor.0 < rect.x + rect.width
-                    && self.cursor.1 < rect.y + rect.height
-            }
-            None => false,
-        };
-        let cursor = if over_selection {
-            self.arrow
-        } else {
-            self.cross
-        };
+        let client = (self.cursor.0 - self.area.x, self.cursor.1 - self.area.y);
+        let over_toolbar = self
+            .toolbar
+            .as_ref()
+            .map(|toolbar| toolbar.hit(client.0, client.1).is_some())
+            .unwrap_or(false);
+        let cursor = if over_toolbar { self.arrow } else { self.cross };
         unsafe {
             let _ = SetCursor(Some(cursor));
         }
@@ -530,7 +1037,7 @@ impl Drop for Overlay {
 }
 
 fn dim_bgra(bgra: &[u8]) -> Vec<u8> {
-    const FACTOR: u16 = 115; // 0.45
+    const FACTOR: u16 = 115;
     let mut dimmed = bgra.to_vec();
     for pixel in dimmed.chunks_exact_mut(4) {
         for channel in &mut pixel[..3] {
@@ -607,6 +1114,13 @@ unsafe fn fill(
     }
 }
 
+fn inside(rect: RectI, point: (i32, i32)) -> bool {
+    point.0 >= rect.x
+        && point.1 >= rect.y
+        && point.0 < rect.x + rect.width
+        && point.1 < rect.y + rect.height
+}
+
 fn loword(value: isize) -> i32 {
     ((value as usize) & 0xFFFF) as u16 as i16 as i32
 }
@@ -659,45 +1173,28 @@ unsafe extern "system" fn overlay_wndproc(
             WM_MOUSEMOVE => {
                 if let Some(overlay) = state(hwnd) {
                     let point = overlay.screen_point(lparam);
-                    overlay.cursor = point;
-                    overlay.state.update(point.0, point.1, overlay.area);
-                    overlay.update_cursor();
-                    if overlay.state.is_active() {
-                        overlay.invalidate();
-                    }
+                    overlay.on_mouse_move(point);
                 }
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
                 if let Some(overlay) = state(hwnd) {
                     let point = overlay.screen_point(lparam);
-                    ::log::debug!(
-                        "overlay mouse down at {point:?}, rect={:?}",
-                        overlay.state.rect()
-                    );
-                    overlay.cursor = point;
-                    overlay.state.begin(point.0, point.1, overlay.area);
-                    SetCapture(hwnd);
-                    overlay.invalidate();
+                    overlay.on_mouse_down(point);
                 }
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
                 if let Some(overlay) = state(hwnd) {
                     let point = overlay.screen_point(lparam);
-                    ::log::debug!("overlay mouse up at {point:?}");
-                    overlay.cursor = point;
-                    overlay.state.update(point.0, point.1, overlay.area);
-                    let _ = ReleaseCapture();
-                    match overlay.state.end(overlay.area) {
-                        EndResult::Cancelled => overlay.cancel(),
-                        _ => overlay.invalidate(),
-                    }
+                    overlay.on_mouse_up(point);
                 }
                 LRESULT(0)
             }
             WM_LBUTTONDBLCLK => {
-                if let Some(overlay) = state(hwnd) {
+                if let Some(overlay) = state(hwnd)
+                    && overlay.text_editor.is_none()
+                {
                     overlay.confirm();
                 }
                 LRESULT(0)
@@ -725,6 +1222,18 @@ unsafe extern "system" fn overlay_wndproc(
                     && wparam.0 == TIMER_SCRIPT
                 {
                     overlay.confirm();
+                }
+                LRESULT(0)
+            }
+            WM_TEXT_COMMIT => {
+                if let Some(overlay) = state(hwnd) {
+                    overlay.commit_text();
+                }
+                LRESULT(0)
+            }
+            WM_TEXT_CANCEL => {
+                if let Some(overlay) = state(hwnd) {
+                    overlay.cancel_text();
                 }
                 LRESULT(0)
             }
