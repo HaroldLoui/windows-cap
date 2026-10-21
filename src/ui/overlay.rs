@@ -23,8 +23,8 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
     DEFAULT_CHARSET, DEFAULT_GUI_FONT, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
     DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FF_DONTCARE, FW_NORMAL, FillRect, FrameRect,
-    GetStockObject, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
-    SRCCOPY, SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
+    GetStockObject, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect, NULL_BRUSH, OUT_DEFAULT_PRECIS,
+    PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -753,12 +753,15 @@ impl Overlay {
 
         if self.tool == Tool::Text {
             let client = (screen.0 - self.area.x, screen.1 - self.area.y);
+            // 先用当前合成结果作为输入框背景，保证看起来是透明的。
+            self.compose();
             match TextEditor::open(
                 self.hwnd,
                 client,
                 position,
                 self.ui_scale,
                 24.0 * self.ui_scale,
+                &self.composed,
             ) {
                 Ok(editor) => {
                     let edit_hwnd = editor.hwnd;
@@ -1294,8 +1297,8 @@ unsafe extern "system" fn overlay_wndproc(
                 if let Some(overlay) = state(hwnd) {
                     let hdc = HDC(wparam.0 as *mut c_void);
                     let _ = SetTextColor(hdc, argb_to_colorref(overlay.color));
-                    let _ = SetBkColor(hdc, COLORREF(0x0020_2020));
-                    return LRESULT(overlay.dark.0 as isize);
+                    let _ = SetBkMode(hdc, TRANSPARENT);
+                    return LRESULT(GetStockObject(NULL_BRUSH).0 as isize);
                 }
                 LRESULT(0)
             }

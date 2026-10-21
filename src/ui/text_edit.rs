@@ -1,13 +1,15 @@
 //! 文字标注输入：一个位于遮罩上的 `EDIT` 子窗口。
 //!
-//! 用系统 EDIT 承载输入，天然支持中文 IME；回车提交、Shift+回车换行、Esc 取消。
+//! 背景透明方式：子类化 EDIT，在 `WM_ERASEBKGND` 里把遮罩合成缓冲中
+//! 该位置的像素原位 BitBlt 进来，文字由系统 EDIT 以透明背景绘制。
+//! 这样既保留原生输入/中文 IME，又不会出现不透明输入框。
 
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DeleteObject,
-    FF_DONTCARE, FW_NORMAL, HGDIOBJ, OUT_DEFAULT_PRECIS,
+    BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DeleteObject,
+    FF_DONTCARE, FW_NORMAL, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::Ime::{
@@ -18,17 +20,22 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DestroyWindow, ES_AUTOVSCROLL, ES_MULTILINE, GWLP_WNDPROC,
-    GetParent, GetWindowTextLengthW, GetWindowTextW, PostMessageW, SendMessageW, SetWindowLongPtrW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_KEYDOWN, WM_SETFONT, WNDPROC, WS_CHILD, WS_VISIBLE,
+    GetClientRect, GetParent, GetWindowTextLengthW, GetWindowTextW, PostMessageW, SendMessageW,
+    SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_SETFONT, WNDPROC, WS_CHILD, WS_VISIBLE,
 };
 use windows::core::w;
 
+use crate::platform::dib::Dib;
 use crate::util::error::Result;
 
 pub const WM_TEXT_COMMIT: u32 = WM_APP + 2;
 pub const WM_TEXT_CANCEL: u32 = WM_APP + 3;
 
 static OLD_PROC: AtomicIsize = AtomicIsize::new(0);
+static BACKGROUND_DC: AtomicIsize = AtomicIsize::new(0);
+static BACKGROUND_X: AtomicI32 = AtomicI32::new(0);
+static BACKGROUND_Y: AtomicI32 = AtomicI32::new(0);
 
 pub struct TextEditor {
     pub hwnd: HWND,
@@ -39,13 +46,14 @@ pub struct TextEditor {
 }
 
 impl TextEditor {
-    /// 在遮罩客户端坐标 `client_position` 处创建输入框，字号与最终文字一致。
+    /// 在遮罩客户端坐标 `client_position` 处创建输入框，背景取自 `background` 的对应区域。
     pub fn open(
         parent: HWND,
         client_position: (i32, i32),
         doc_position: (i32, i32),
         scale: f32,
         font_size: f32,
+        background: &Dib,
     ) -> Result<Self> {
         let scale = scale.max(1.0);
         let width = ((320.0 * scale).round() as i32).max(160);
@@ -68,6 +76,10 @@ impl TextEditor {
                 Some(hinstance),
                 None,
             )?;
+
+            BACKGROUND_DC.store(background.dc.0 as isize, Ordering::SeqCst);
+            BACKGROUND_X.store(client_position.0, Ordering::SeqCst);
+            BACKGROUND_Y.store(client_position.1, Ordering::SeqCst);
 
             let font = CreateFontW(
                 font_height,
@@ -138,6 +150,7 @@ impl Drop for TextEditor {
             if !self.font.0.is_null() {
                 let _ = DeleteObject(self.font);
             }
+            BACKGROUND_DC.store(0, Ordering::SeqCst);
         }
     }
 }
@@ -149,21 +162,45 @@ unsafe extern "system" fn edit_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     unsafe {
-        if message == WM_KEYDOWN {
-            let key = wparam.0 as u16;
-            let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
-            if key == VK_RETURN.0 && !shift {
-                if let Ok(parent) = GetParent(hwnd) {
-                    let _ = PostMessageW(Some(parent), WM_TEXT_COMMIT, WPARAM(0), LPARAM(0));
+        match message {
+            WM_ERASEBKGND => {
+                let background = HDC(BACKGROUND_DC.load(Ordering::SeqCst) as *mut _);
+                if !background.0.is_null() {
+                    let mut rect = RECT::default();
+                    if GetClientRect(hwnd, &mut rect).is_ok() {
+                        let hdc = HDC(wparam.0 as *mut _);
+                        let _ = BitBlt(
+                            hdc,
+                            0,
+                            0,
+                            rect.right,
+                            rect.bottom,
+                            Some(background),
+                            BACKGROUND_X.load(Ordering::SeqCst),
+                            BACKGROUND_Y.load(Ordering::SeqCst),
+                            SRCCOPY,
+                        );
+                    }
                 }
-                return LRESULT(0);
+                return LRESULT(1);
             }
-            if key == VK_ESCAPE.0 {
-                if let Ok(parent) = GetParent(hwnd) {
-                    let _ = PostMessageW(Some(parent), WM_TEXT_CANCEL, WPARAM(0), LPARAM(0));
+            WM_KEYDOWN => {
+                let key = wparam.0 as u16;
+                let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
+                if key == VK_RETURN.0 && !shift {
+                    if let Ok(parent) = GetParent(hwnd) {
+                        let _ = PostMessageW(Some(parent), WM_TEXT_COMMIT, WPARAM(0), LPARAM(0));
+                    }
+                    return LRESULT(0);
                 }
-                return LRESULT(0);
+                if key == VK_ESCAPE.0 {
+                    if let Ok(parent) = GetParent(hwnd) {
+                        let _ = PostMessageW(Some(parent), WM_TEXT_CANCEL, WPARAM(0), LPARAM(0));
+                    }
+                    return LRESULT(0);
+                }
             }
+            _ => {}
         }
 
         let previous: WNDPROC = std::mem::transmute(OLD_PROC.load(Ordering::SeqCst));
