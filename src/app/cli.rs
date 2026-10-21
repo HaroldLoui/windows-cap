@@ -1,23 +1,107 @@
+//! 命令行解析（clap）。
+
 use std::path::PathBuf;
+
+use clap::{Parser, ValueEnum};
 
 use crate::capture::RectI;
 use crate::util::error::{AppError, Result};
 
+#[derive(Parser, Debug)]
+#[command(
+    name = "window-cap",
+    version,
+    about = "Windows 截图与标注工具（Flameshot 风格）",
+    long_about = "用法：\n  window-cap                 常驻：托盘 + 全局热键\n  window-cap --capture ...   无 UI 采集\n  window-cap --selftest      自检\n\n配置：%APPDATA%\\window-cap\\config.toml"
+)]
 pub struct Cli {
+    /// 常驻模式：全局热键 + 托盘（默认）
+    #[arg(long)]
+    pub hotkey: bool,
+
+    /// 立即执行一次截图流程后退出（测试用）
+    #[arg(long)]
+    pub once: bool,
+
+    /// 环境、采集、坐标、剪贴板与落盘自检
+    #[arg(long)]
+    pub selftest: bool,
+
+    /// 无 UI 采集整个虚拟桌面
+    #[arg(long)]
+    pub capture: bool,
+
+    /// 配合 --capture：x,y,w,h
+    #[arg(long, value_parser = parse_region)]
+    pub region: Option<RectI>,
+
+    /// 配合 --capture：保存为 PNG
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    /// 配合 --capture：复制到剪贴板（CF_DIB）
+    #[arg(long)]
+    pub clipboard: bool,
+
+    /// 配合 --capture：以 JSON 输出结果
+    #[arg(long)]
+    pub json: bool,
+
+    /// 截图前延迟毫秒数（--once / --capture）
+    #[arg(long, default_value_t = 0)]
+    pub delay: u64,
+
+    /// 配置文件路径（默认 %APPDATA%\window-cap\config.toml）
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+
+    /// 连续采集 N 次，检查句柄/内存泄漏
+    #[arg(long)]
+    pub soak: Option<u32>,
+
+    /// 技术验证：capture | focus | ime | gdiplus
+    #[arg(long)]
+    pub spike: Option<String>,
+
+    /// 遮罩窗口压力测试次数（脚本化选区）
+    #[arg(long)]
+    pub overlay_selftest: Option<u32>,
+
+    /// 开机自启：on | off | status
+    #[arg(long)]
+    pub autostart: Option<AutoStartAction>,
+
+    /// 输出调试日志
+    #[arg(long, short)]
+    pub verbose: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum AutoStartAction {
+    On,
+    Off,
+    Status,
+}
+
+pub struct Parsed {
     pub verbose: bool,
     pub command: Command,
 }
 
 pub enum Command {
-    Help,
-    Version,
-    Selftest,
+    Resident {
+        config: Option<PathBuf>,
+    },
+    Once {
+        config: Option<PathBuf>,
+        delay_ms: u64,
+    },
     Capture(CaptureOptions),
+    Selftest,
     Soak(u32),
     Spike(String),
-    Resident,
-    Once,
     OverlaySelftest(u32),
+    Autostart(AutoStartAction),
 }
 
 #[derive(Default, Clone)]
@@ -26,169 +110,124 @@ pub struct CaptureOptions {
     pub output: Option<PathBuf>,
     pub clipboard: bool,
     pub json: bool,
+    pub delay_ms: u64,
 }
 
-enum Mode {
-    Help,
-    Version,
-    Selftest,
-    Capture,
-    Soak(u32),
-    Spike(String),
-    Resident,
-    Once,
-    OverlaySelftest(u32),
+/// 解析命令行；`--help` / `--version` 由 clap 直接打印并退出。
+pub fn parse() -> Parsed {
+    let cli = Cli::parse();
+    let verbose = cli.verbose;
+    let command = cli.into_command().unwrap_or_else(|error| {
+        eprintln!("参数错误: {error}");
+        std::process::exit(2);
+    });
+    Parsed { verbose, command }
 }
 
-pub fn parse() -> Result<Cli> {
-    let mut verbose = false;
-    let mut mode: Option<Mode> = None;
-    let mut capture: Option<CaptureOptions> = None;
-    let mut args = std::env::args().skip(1);
+impl Cli {
+    fn into_command(self) -> Result<Command> {
+        let capture_options_present =
+            self.region.is_some() || self.output.is_some() || self.clipboard || self.json;
 
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => set_mode(&mut mode, Mode::Help)?,
-            "-V" | "--version" => set_mode(&mut mode, Mode::Version)?,
-            "-v" | "--verbose" => verbose = true,
-            "--hotkey" => set_mode(&mut mode, Mode::Resident)?,
-            "--once" => set_mode(&mut mode, Mode::Once)?,
-            "--selftest" => set_mode(&mut mode, Mode::Selftest)?,
-            "--overlay-selftest" => {
-                let value = args.next().ok_or_else(|| {
-                    AppError::msg("--overlay-selftest 需要次数，例如 --overlay-selftest 50")
-                })?;
-                let iterations: u32 = value.parse().map_err(|_| {
-                    AppError::msg(format!("--overlay-selftest 次数无效: {value:?}"))
-                })?;
-                if iterations == 0 {
-                    return Err(AppError::msg("--overlay-selftest 次数必须大于 0"));
-                }
-                set_mode(&mut mode, Mode::OverlaySelftest(iterations))?;
-            }
-            "--capture" => {
-                set_mode(&mut mode, Mode::Capture)?;
-                capture.get_or_insert_with(CaptureOptions::default);
-            }
-            "--soak" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| AppError::msg("--soak 需要次数，例如 --soak 100"))?;
-                let iterations: u32 = value
-                    .parse()
-                    .map_err(|_| AppError::msg(format!("--soak 次数无效: {value:?}")))?;
-                if iterations == 0 {
-                    return Err(AppError::msg("--soak 次数必须大于 0"));
-                }
-                set_mode(&mut mode, Mode::Soak(iterations))?;
-            }
-            "--spike" => {
-                let name = args.next().ok_or_else(|| {
-                    AppError::msg("--spike 需要参数: capture | focus | ime | gdiplus")
-                })?;
-                set_mode(&mut mode, Mode::Spike(name))?;
-            }
-            "--region" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| AppError::msg("--region 需要 x,y,w,h"))?;
-                let region = RectI::parse(&value)?;
-                capture_options(&mut mode, &mut capture)?.region = Some(region);
-            }
-            "--output" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| AppError::msg("--output 需要文件路径"))?;
-                capture_options(&mut mode, &mut capture)?.output = Some(PathBuf::from(value));
-            }
-            "--clipboard" => {
-                capture_options(&mut mode, &mut capture)?.clipboard = true;
-            }
-            "--json" => {
-                capture_options(&mut mode, &mut capture)?.json = true;
-            }
-            other => {
-                return Err(AppError::msg(format!("未知参数: {other}\n\n{HELP}")));
-            }
+        let modes = [
+            self.hotkey,
+            self.once,
+            self.selftest,
+            self.capture,
+            self.soak.is_some(),
+            self.spike.is_some(),
+            self.overlay_selftest.is_some(),
+            self.autostart.is_some(),
+        ]
+        .iter()
+        .filter(|present| **present)
+        .count();
+
+        if modes > 1 {
+            return Err(AppError::msg(
+                "只能指定一个运行模式：--hotkey / --once / --selftest / --capture / --soak / --spike / --overlay-selftest / --autostart",
+            ));
         }
+
+        if capture_options_present && !self.capture && modes > 0 {
+            return Err(AppError::msg(
+                "--region / --output / --clipboard / --json 只能与 --capture 一起使用",
+            ));
+        }
+
+        if let Some(action) = self.autostart {
+            return Ok(Command::Autostart(action));
+        }
+        if let Some(iterations) = self.soak {
+            if iterations == 0 {
+                return Err(AppError::msg("--soak 次数必须大于 0"));
+            }
+            return Ok(Command::Soak(iterations));
+        }
+        if let Some(name) = self.spike {
+            return Ok(Command::Spike(name));
+        }
+        if let Some(iterations) = self.overlay_selftest {
+            if iterations == 0 {
+                return Err(AppError::msg("--overlay-selftest 次数必须大于 0"));
+            }
+            return Ok(Command::OverlaySelftest(iterations));
+        }
+        if self.selftest {
+            return Ok(Command::Selftest);
+        }
+        if self.once {
+            return Ok(Command::Once {
+                config: self.config,
+                delay_ms: self.delay,
+            });
+        }
+        if self.capture || capture_options_present {
+            return Ok(Command::Capture(CaptureOptions {
+                region: self.region,
+                output: self.output,
+                clipboard: self.clipboard,
+                json: self.json,
+                delay_ms: self.delay,
+            }));
+        }
+        if self.delay > 0 {
+            return Err(AppError::msg("--delay 需要配合 --once 或 --capture 使用"));
+        }
+
+        Ok(Command::Resident {
+            config: self.config,
+        })
     }
-
-    let command = match mode.unwrap_or(Mode::Resident) {
-        Mode::Help => Command::Help,
-        Mode::Version => Command::Version,
-        Mode::Selftest => Command::Selftest,
-        Mode::Capture => Command::Capture(capture.unwrap_or_default()),
-        Mode::Soak(iterations) => Command::Soak(iterations),
-        Mode::Spike(name) => Command::Spike(name),
-        Mode::Resident => Command::Resident,
-        Mode::Once => Command::Once,
-        Mode::OverlaySelftest(iterations) => Command::OverlaySelftest(iterations),
-    };
-
-    Ok(Cli { verbose, command })
 }
 
-fn set_mode(slot: &mut Option<Mode>, mode: Mode) -> Result<()> {
-    if slot.is_some() {
-        return Err(AppError::msg(
-            "只能指定一个运行模式：--help / --version / --hotkey / --once / --selftest / --capture / --soak / --spike / --overlay-selftest",
+fn parse_region(value: &str) -> std::result::Result<RectI, String> {
+    RectI::parse(value).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(args: &[&str]) -> Result<Command> {
+        Cli::try_parse_from(std::iter::once("window-cap").chain(args.iter().copied()))
+            .map_err(|error| AppError::msg(error.to_string()))?
+            .into_command()
+    }
+
+    #[test]
+    fn parses_modes() {
+        assert!(matches!(parsed(&[]), Ok(Command::Resident { .. })));
+        assert!(matches!(parsed(&["--once"]), Ok(Command::Once { .. })));
+        assert!(matches!(
+            parsed(&["--capture", "--region", "10,20,30,40"]),
+            Ok(Command::Capture(_))
         ));
-    }
-    *slot = Some(mode);
-    Ok(())
-}
-
-fn capture_options<'a>(
-    mode: &mut Option<Mode>,
-    capture: &'a mut Option<CaptureOptions>,
-) -> Result<&'a mut CaptureOptions> {
-    if mode.is_none() {
-        *mode = Some(Mode::Capture);
-    }
-    if !matches!(mode, Some(Mode::Capture)) {
-        return Err(AppError::msg(
-            "--region / --output / --clipboard / --json 只能与 --capture 一起使用",
+        assert!(matches!(
+            parsed(&["--autostart", "status"]),
+            Ok(Command::Autostart(AutoStartAction::Status))
         ));
+        assert!(parsed(&["--once", "--selftest"]).is_err());
+        assert!(parsed(&["--region", "1,2,3,4"]).is_ok());
     }
-    Ok(capture.get_or_insert_with(CaptureOptions::default))
-}
-
-pub const HELP: &str = "\
-window-cap - Windows 截图与标注工具
-
-用法:
-  window-cap                 常驻运行：Ctrl+Alt+A 截图，Ctrl+Alt+Q 退出
-  window-cap [选项]
-
-运行模式:
-  --hotkey                   常驻模式（默认）
-  --once                     立即执行一次截图流程后退出（测试用）
-  --selftest                 环境、采集、坐标、剪贴板与落盘自检
-  --capture                  无 UI 采集整个虚拟桌面
-  --region x,y,w,h           配合 --capture：只截取指定区域
-  --output <路径>            配合 --capture：保存为 PNG
-  --clipboard                配合 --capture：复制到剪贴板（CF_DIB）
-  --json                     配合 --capture：以 JSON 输出结果
-  --soak <次数>              连续采集 N 次，检查句柄/内存泄漏
-
-开发:
-  --overlay-selftest <次数>  遮罩窗口压力测试（脚本化选区）
-  --spike <名称>             技术验证: capture | focus | ime | gdiplus
-
-其它:
-  -h, --help                 显示帮助
-  -V, --version              显示版本
-  -v, --verbose              输出调试日志
-
-阶段状态:
-  P0 工程骨架与 Spike（完成）
-  P1 采集与输出（完成）
-  P2 遮罩与框选（当前）
-  P3 标注引擎
-  P4 系统集成
-  P5 兼容性与 Beta
-";
-
-pub fn print_help() {
-    println!("{HELP}");
 }

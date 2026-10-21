@@ -1,26 +1,29 @@
-//! 全局热键与常驻模式（P2：无托盘，命令行启动）。
-//!
-//! - `Ctrl+Alt+A` 截图
-//! - `Ctrl+Alt+Q` 退出
-//!
-//! `--once` 用于测试：不起热键，直接走一次截图流程。
+//! 常驻模式：托盘、全局热键、单实例、配置热加载、延迟截图。
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
-    UnregisterHotKey, VK_A, VK_Q, VK_X,
+    MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VK_Q,
 };
+use windows::Win32::UI::Shell::NIN_SELECT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetMessageW, MSG, PostQuitMessage, RegisterClassW, TranslateMessage, WINDOW_EX_STYLE,
-    WM_DESTROY, WM_HOTKEY, WNDCLASSW, WS_OVERLAPPED,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, KillTimer, MSG,
+    PostQuitMessage, RegisterClassW, SW_HIDE, SetTimer, SetWindowLongPtrW, ShowWindow,
+    TranslateMessage, WINDOW_EX_STYLE, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_LBUTTONDBLCLK,
+    WM_LBUTTONUP, WM_NCCREATE, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::w;
 
+use super::autostart;
+use super::config::{Config, DEFAULT_CAPTURE_HOTKEY, DEFAULT_QUIT_HOTKEY, Hotkey};
+use super::single_instance::{self, SingleInstance, WM_APP_ACTIVATE};
+use super::tray::{Tray, TrayCommand, WM_TRAY};
 use crate::capture::{CaptureBackend, GdiBackend, RectI, VirtualScreen};
 use crate::output::{clipboard, files};
 use crate::ui::{self, OverlayOptions, OverlayResult};
@@ -29,11 +32,33 @@ use crate::util::resources::process_resources;
 
 const HOTKEY_CAPTURE: i32 = 1;
 const HOTKEY_QUIT: i32 = 2;
+const TIMER_DELAY: usize = 1;
+const TRAY_DELAY_MS: u32 = 3000;
 
 static CAPTURING: AtomicBool = AtomicBool::new(false);
 
-/// 常驻：注册全局热键并进入消息循环。
-pub fn run_resident() -> Result<()> {
+/// 常驻：托盘 + 全局热键 + 单实例。
+pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
+    let single_instance = SingleInstance::acquire()?;
+    if single_instance.already_running() {
+        let activated = single_instance::activate_existing();
+        if activated {
+            println!("window-cap 已在运行");
+        } else {
+            eprintln!("window-cap 已在运行（未找到常驻窗口）");
+        }
+        return Ok(());
+    }
+
+    hide_own_console();
+
+    let path = Config::path(config_path.as_deref());
+    let (config, warning) = Config::load_or_create(&path);
+    if let Some(warning) = &warning {
+        eprintln!("配置: {warning}");
+        ::log::warn!("{warning}");
+    }
+
     unsafe {
         let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
         let mut window_class: WNDCLASSW = std::mem::zeroed();
@@ -58,49 +83,49 @@ pub fn run_resident() -> Result<()> {
             None,
         )?;
 
-        // 默认 Ctrl+Alt+A 常被 IM 占用，失败时自动退避到其它组合。
-        let candidates = [
-            ("Ctrl+Alt+A", MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_A),
-            ("Ctrl+Shift+A", MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_A),
-            ("Ctrl+Alt+X", MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_X),
-        ];
+        let mut app = Box::new(App {
+            hwnd,
+            config,
+            config_path: path,
+            tray: None,
+            capture_label: DEFAULT_CAPTURE_HOTKEY.to_string(),
+            quit_label: DEFAULT_QUIT_HOTKEY.to_string(),
+        });
 
-        let mut registered: Option<(&str, HOT_KEY_MODIFIERS)> = None;
-        let mut last_error = None;
-        for (label, modifiers, virtual_key) in candidates {
-            match RegisterHotKey(Some(hwnd), HOTKEY_CAPTURE, modifiers, virtual_key.0 as u32) {
-                Ok(()) => {
-                    registered = Some((label, modifiers));
-                    break;
-                }
-                Err(error) => last_error = Some((label, error)),
+        ::log::info!("resident window hwnd={hwnd:?}");
+
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *app) as *mut App as isize);
+
+        match Tray::add(hwnd, "window-cap - 截图工具") {
+            Ok(tray) => app.tray = Some(tray),
+            Err(error) => {
+                eprintln!("托盘不可用: {error}");
+                ::log::warn!("tray unavailable: {error}");
             }
         }
 
-        let Some((capture_label, modifiers)) = registered else {
-            let detail = last_error
-                .map(|(label, error)| format!("{label}: {error}"))
-                .unwrap_or_default();
-            return Err(AppError::msg(format!(
-                "截图热键全部被占用（Ctrl+Alt+A / Ctrl+Shift+A / Ctrl+Alt+X）: {detail}"
-            )));
-        };
-        let quit_label = format!("{}Q", &capture_label[..capture_label.len() - 1]);
-
-        if let Err(error) = RegisterHotKey(Some(hwnd), HOTKEY_QUIT, modifiers, VK_Q.0 as u32) {
-            let _ = UnregisterHotKey(Some(hwnd), HOTKEY_CAPTURE);
-            return Err(AppError::msg(format!(
-                "注册退出热键 {quit_label} 失败: {error}"
-            )));
+        if let Some(warning) = &warning {
+            app.notify(warning, true);
         }
 
-        if capture_label != "Ctrl+Alt+A" {
-            println!("提示: Ctrl+Alt+A 已被其他程序占用，改用 {capture_label}");
+        if app.apply_hotkeys() {
+            let tooltip = format!("window-cap - {} 截图", app.capture_label);
+            if let Some(tray) = &app.tray {
+                tray.set_tooltip(&tooltip);
+            }
+            println!("window-cap 已启动");
+            println!("  截图: {}", app.capture_label);
+            if app.quit_label.is_empty() {
+                println!("  退出: 托盘菜单");
+            } else {
+                println!("  退出: {}", app.quit_label);
+            }
+            ::log::info!(
+                "resident started: capture={} quit={}",
+                app.capture_label,
+                app.quit_label
+            );
         }
-        println!("window-cap 已启动");
-        println!("  截图: {capture_label}");
-        println!("  退出: {quit_label}（或关闭控制台）");
-        ::log::info!("resident started, hotkey {capture_label}");
 
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).0 > 0 {
@@ -110,14 +135,35 @@ pub fn run_resident() -> Result<()> {
 
         let _ = UnregisterHotKey(Some(hwnd), HOTKEY_CAPTURE);
         let _ = UnregisterHotKey(Some(hwnd), HOTKEY_QUIT);
+        drop(app);
     }
 
     Ok(())
 }
 
 /// 不走热键，直接执行一次截图流程（测试/脚本用）。
-pub fn run_once() -> Result<()> {
-    capture_flow(None).map(|_| ())
+pub fn run_once(config_path: Option<PathBuf>, delay_ms: u64) -> Result<()> {
+    let path = Config::path(config_path.as_deref());
+    let (config, warning) = Config::load_or_create(&path);
+    if let Some(warning) = warning {
+        eprintln!("配置: {warning}");
+    }
+
+    if delay_ms > 0 {
+        println!("{delay_ms} ms 后截图…");
+        std::thread::sleep(Duration::from_millis(delay_ms));
+    }
+
+    match capture_flow(None, &config)? {
+        Some(outcome) => {
+            println!("{}", outcome.message());
+            Ok(())
+        }
+        None => {
+            println!("已取消");
+            Ok(())
+        }
+    }
 }
 
 /// 遮罩压力测试：脚本化选区，反复创建/绘制/确认遮罩，检查句柄泄漏。
@@ -214,7 +260,38 @@ pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
     Ok(())
 }
 
-fn capture_flow(scripted: Option<RectI>) -> Result<Option<RectI>> {
+struct CaptureOutcome {
+    width: u32,
+    height: u32,
+    path: Option<PathBuf>,
+    copied: bool,
+}
+
+impl CaptureOutcome {
+    fn message(&self) -> String {
+        match (&self.path, self.copied) {
+            (Some(path), true) => format!(
+                "已复制 {}×{} 并保存到 {}",
+                self.width,
+                self.height,
+                path.display()
+            ),
+            (Some(path), false) => format!(
+                "已保存 {}×{} 到 {}",
+                self.width,
+                self.height,
+                path.display()
+            ),
+            (None, true) => format!("已复制 {}×{} 到剪贴板", self.width, self.height),
+            (None, false) => format!(
+                "截图完成 {}×{}（未保存，请检查配置）",
+                self.width, self.height
+            ),
+        }
+    }
+}
+
+fn capture_flow(scripted: Option<RectI>, config: &Config) -> Result<Option<CaptureOutcome>> {
     let screen = VirtualScreen::current();
     if screen.width <= 0 || screen.height <= 0 {
         return Err(AppError::msg("虚拟桌面尺寸无效"));
@@ -235,28 +312,287 @@ fn capture_flow(scripted: Option<RectI>) -> Result<Option<RectI>> {
     )?;
 
     match result {
-        OverlayResult::Confirmed { image, rect } => {
-            clipboard::put(&image)?;
-            let path = files::default_path();
-            files::save_png(&image, &path)?;
-            println!(
-                "已复制 {}×{} 到剪贴板，保存到 {}",
-                image.width,
-                image.height,
-                path.display()
-            );
+        OverlayResult::Confirmed { image, rect: _ } => {
+            let mut copied = false;
+            if config.output.copy_to_clipboard {
+                clipboard::put(&image)?;
+                copied = true;
+            }
+
+            let mut path = None;
+            if config.output.save_file {
+                let target = files::path_in(&config.save_dir());
+                files::save_png(&image, &target)?;
+                path = Some(target);
+            }
+
             ::log::info!(
-                "capture ok {}x{} capture_ms={:.1}",
+                "capture ok {}x{} capture_ms={:.1} copied={} saved={}",
                 image.width,
                 image.height,
-                capture_ms
+                capture_ms,
+                copied,
+                path.is_some()
             );
-            Ok(Some(rect))
+
+            Ok(Some(CaptureOutcome {
+                width: image.width,
+                height: image.height,
+                path,
+                copied,
+            }))
         }
         OverlayResult::Cancelled => {
-            println!("已取消");
             ::log::info!("capture cancelled");
             Ok(None)
+        }
+    }
+}
+
+struct App {
+    hwnd: HWND,
+    config: Config,
+    config_path: PathBuf,
+    tray: Option<Tray>,
+    capture_label: String,
+    quit_label: String,
+}
+
+impl App {
+    fn notify(&self, message: &str, is_error: bool) {
+        if let Some(tray) = &self.tray {
+            tray.notify(message, is_error);
+        }
+        if is_error {
+            eprintln!("{message}");
+        } else {
+            println!("{message}");
+        }
+    }
+
+    fn apply_hotkeys(&mut self) -> bool {
+        let (capture, quit) = unsafe {
+            let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_CAPTURE);
+            let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_QUIT);
+            register_hotkeys(self.hwnd, &self.config)
+        };
+
+        let Some(capture) = capture else {
+            self.notify(
+                "截图热键全部被占用（配置热键 / Ctrl+Alt+A / Ctrl+Shift+A / Ctrl+Alt+X）",
+                true,
+            );
+            return false;
+        };
+
+        self.capture_label = capture.label();
+        match quit {
+            Some(quit) => {
+                self.quit_label = quit.label();
+            }
+            None => {
+                self.quit_label.clear();
+                self.notify("退出热键被占用，可用托盘菜单退出", true);
+            }
+        }
+
+        if Hotkey::parse(&self.config.hotkey.capture).ok() != Some(capture) {
+            self.notify(
+                &format!(
+                    "配置热键 {} 不可用，已改用 {}",
+                    self.config.hotkey.capture, self.capture_label
+                ),
+                false,
+            );
+        }
+
+        true
+    }
+
+    fn start_capture(&mut self, delayed: bool) {
+        if CAPTURING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        if delayed {
+            unsafe {
+                SetTimer(Some(self.hwnd), TIMER_DELAY, TRAY_DELAY_MS, None);
+            }
+            return;
+        }
+
+        self.do_capture();
+        CAPTURING.store(false, Ordering::SeqCst);
+    }
+
+    fn do_capture(&mut self) {
+        match capture_flow(None, &self.config) {
+            Ok(Some(outcome)) => self.notify(&outcome.message(), false),
+            Ok(None) => {
+                ::log::info!("capture cancelled by user");
+            }
+            Err(error) => {
+                ::log::error!("capture failed: {error}");
+                self.notify(&format!("截图失败: {error}"), true);
+            }
+        }
+    }
+
+    fn on_tray(&mut self, lparam: LPARAM) {
+        let event = ((lparam.0 as usize) & 0xFFFF) as u32;
+        match event {
+            // V4 通知：左键给 NIN_SELECT / NIN_KEYSELECT，右键给 WM_CONTEXTMENU。
+            NIN_SELECT | 1025 | WM_LBUTTONUP | WM_LBUTTONDBLCLK => self.start_capture(false),
+            WM_RBUTTONUP | WM_CONTEXTMENU => self.show_menu(),
+            _ => {}
+        }
+    }
+
+    fn show_menu(&mut self) {
+        let autostart_enabled = autostart::is_enabled();
+        let command = self
+            .tray
+            .as_ref()
+            .and_then(|tray| tray.show_menu(autostart_enabled, &self.capture_label));
+
+        let Some(command) = command else {
+            return;
+        };
+
+        match command {
+            TrayCommand::Capture => self.start_capture(false),
+            TrayCommand::DelayedCapture => self.start_capture(true),
+            TrayCommand::ReloadConfig => self.reload_config(),
+            TrayCommand::ToggleAutostart => self.toggle_autostart(),
+            TrayCommand::OpenConfig => self.open_config(),
+            TrayCommand::Quit => unsafe {
+                let _ = DestroyWindow(self.hwnd);
+            },
+        }
+    }
+
+    fn reload_config(&mut self) {
+        let (config, warning) = Config::load_or_create(&self.config_path);
+        if let Some(warning) = warning {
+            self.notify(&warning, true);
+        }
+        self.config = config;
+        if self.apply_hotkeys() {
+            let tooltip = format!("window-cap - {} 截图", self.capture_label);
+            if let Some(tray) = &self.tray {
+                tray.set_tooltip(&tooltip);
+            }
+            ::log::info!(
+                "config reloaded from {}: capture={} quit={}",
+                self.config_path.display(),
+                self.capture_label,
+                self.quit_label
+            );
+            self.notify(
+                &format!("配置已重新加载，截图热键 {}", self.capture_label),
+                false,
+            );
+        }
+    }
+
+    fn toggle_autostart(&mut self) {
+        let enabled = autostart::is_enabled();
+        match autostart::set_enabled(!enabled) {
+            Ok(()) => {
+                if enabled {
+                    self.notify("已关闭开机自启", false);
+                } else {
+                    self.notify("已开启开机自启", false);
+                }
+            }
+            Err(error) => self.notify(&format!("设置开机自启失败: {error}"), true),
+        }
+    }
+
+    fn open_config(&mut self) {
+        if let Err(error) = std::process::Command::new("notepad")
+            .arg(&self.config_path)
+            .spawn()
+        {
+            self.notify(&format!("打开配置文件失败: {error}"), true);
+        }
+    }
+}
+
+/// 注册截图/退出热键，失败时按候选列表退避。
+unsafe fn register_hotkeys(hwnd: HWND, config: &Config) -> (Option<Hotkey>, Option<Hotkey>) {
+    unsafe {
+        let mut capture = None;
+        for text in [
+            config.hotkey.capture.as_str(),
+            DEFAULT_CAPTURE_HOTKEY,
+            "Ctrl+Shift+A",
+            "Ctrl+Alt+X",
+        ] {
+            let Ok(hotkey) = Hotkey::parse(text) else {
+                continue;
+            };
+            if RegisterHotKey(
+                Some(hwnd),
+                HOTKEY_CAPTURE,
+                hotkey.modifiers | MOD_NOREPEAT,
+                hotkey.virtual_key,
+            )
+            .is_ok()
+            {
+                capture = Some(hotkey);
+                break;
+            }
+        }
+
+        let Some(capture) = capture else {
+            return (None, None);
+        };
+
+        let same_modifiers = Hotkey {
+            modifiers: capture.modifiers,
+            virtual_key: VK_Q.0 as u32,
+        };
+
+        let mut quit_candidates = vec![
+            config.hotkey.quit.clone(),
+            same_modifiers.label(),
+            DEFAULT_QUIT_HOTKEY.to_string(),
+        ];
+        quit_candidates.dedup();
+
+        let mut quit = None;
+        for text in quit_candidates {
+            let Ok(hotkey) = Hotkey::parse(&text) else {
+                continue;
+            };
+            if hotkey == capture {
+                continue;
+            }
+            if RegisterHotKey(
+                Some(hwnd),
+                HOTKEY_QUIT,
+                hotkey.modifiers | MOD_NOREPEAT,
+                hotkey.virtual_key,
+            )
+            .is_ok()
+            {
+                quit = Some(hotkey);
+                break;
+            }
+        }
+
+        (Some(capture), quit)
+    }
+}
+
+unsafe fn state(hwnd: HWND) -> Option<&'static mut App> {
+    unsafe {
+        let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
+        if pointer.is_null() {
+            None
+        } else {
+            Some(&mut *pointer)
         }
     }
 }
@@ -269,29 +605,77 @@ unsafe extern "system" fn hotkey_wndproc(
 ) -> LRESULT {
     unsafe {
         match message {
+            WM_NCCREATE => {
+                let create = lparam.0 as *const CREATESTRUCTW;
+                if !create.is_null() {
+                    let app = (*create).lpCreateParams as *mut App;
+                    if !app.is_null() {
+                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, app as isize);
+                    }
+                }
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
             WM_HOTKEY => {
-                match wparam.0 as i32 {
-                    HOTKEY_CAPTURE => {
-                        if !CAPTURING.swap(true, Ordering::SeqCst) {
-                            if let Err(error) = capture_flow(None) {
-                                eprintln!("截图失败: {error}");
-                                ::log::error!("capture failed: {error}");
-                            }
-                            CAPTURING.store(false, Ordering::SeqCst);
+                if let Some(app) = state(hwnd) {
+                    match wparam.0 as i32 {
+                        HOTKEY_CAPTURE => app.start_capture(false),
+                        HOTKEY_QUIT => {
+                            let _ = DestroyWindow(hwnd);
                         }
+                        _ => {}
                     }
-                    HOTKEY_QUIT => {
-                        let _ = DestroyWindow(hwnd);
-                    }
-                    _ => {}
+                }
+                LRESULT(0)
+            }
+            WM_TRAY => {
+                if let Some(app) = state(hwnd) {
+                    app.on_tray(lparam);
+                }
+                LRESULT(0)
+            }
+            WM_APP_ACTIVATE => {
+                if let Some(app) = state(hwnd) {
+                    app.notify(
+                        &format!("window-cap 已在运行（{} 截图）", app.capture_label),
+                        false,
+                    );
+                }
+                LRESULT(0)
+            }
+            WM_TIMER => {
+                if wparam.0 == TIMER_DELAY
+                    && let Some(app) = state(hwnd)
+                {
+                    let _ = KillTimer(Some(hwnd), TIMER_DELAY);
+                    app.do_capture();
+                    CAPTURING.store(false, Ordering::SeqCst);
                 }
                 LRESULT(0)
             }
             WM_DESTROY => {
+                // 先移除托盘图标，再退出消息循环。
+                if let Some(app) = state(hwnd) {
+                    app.tray = None;
+                }
                 PostQuitMessage(0);
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, message, wparam, lparam),
+        }
+    }
+}
+
+/// 双击启动（控制台只属于本进程）时隐藏控制台；从终端启动时保留。
+fn hide_own_console() {
+    unsafe {
+        let console = GetConsoleWindow();
+        if console.0.is_null() {
+            return;
+        }
+        let mut processes = [0u32; 2];
+        let count = GetConsoleProcessList(&mut processes);
+        if count == 1 {
+            let _ = ShowWindow(console, SW_HIDE);
         }
     }
 }

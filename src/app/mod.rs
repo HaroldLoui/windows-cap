@@ -1,8 +1,12 @@
+pub mod autostart;
 pub mod cli;
+pub mod config;
 pub mod hotkey;
+pub mod single_instance;
+pub mod tray;
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::capture::{self, CaptureBackend, GdiBackend, RectI, VirtualScreen};
 use crate::output::{clipboard, files};
@@ -12,49 +16,27 @@ use crate::util::error::{AppError, Result};
 use crate::util::resources::process_resources;
 
 pub fn run() -> Result<()> {
-    let cli = cli::parse()?;
+    let parsed = cli::parse();
+    crate::util::log::init(parsed.verbose)?;
 
-    match cli.command {
-        cli::Command::Help => {
-            cli::print_help();
-            Ok(())
-        }
-        cli::Command::Version => {
-            println!("window-cap {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
-        }
-        cli::Command::Selftest => {
-            crate::util::log::init(cli.verbose)?;
-            selftest()
-        }
-        cli::Command::Capture(options) => {
-            crate::util::log::init(cli.verbose)?;
-            capture_command(options)
-        }
-        cli::Command::Soak(iterations) => {
-            crate::util::log::init(cli.verbose)?;
-            soak(iterations)
-        }
-        cli::Command::Spike(name) => {
-            crate::util::log::init(cli.verbose)?;
-            spike::run(&name)
-        }
-        cli::Command::Resident => {
-            crate::util::log::init(cli.verbose)?;
-            hotkey::run_resident()
-        }
-        cli::Command::Once => {
-            crate::util::log::init(cli.verbose)?;
-            hotkey::run_once()
-        }
-        cli::Command::OverlaySelftest(iterations) => {
-            crate::util::log::init(cli.verbose)?;
-            hotkey::run_overlay_selftest(iterations)
-        }
+    match parsed.command {
+        cli::Command::Resident { config } => hotkey::run_resident(config),
+        cli::Command::Once { config, delay_ms } => hotkey::run_once(config, delay_ms),
+        cli::Command::Capture(options) => capture_command(options),
+        cli::Command::Selftest => selftest(),
+        cli::Command::Soak(iterations) => soak(iterations),
+        cli::Command::Spike(name) => spike::run(&name),
+        cli::Command::OverlaySelftest(iterations) => hotkey::run_overlay_selftest(iterations),
+        cli::Command::Autostart(action) => autostart::run(action),
     }
 }
 
 fn capture_command(options: cli::CaptureOptions) -> Result<()> {
+    if options.delay_ms > 0 {
+        println!("{} ms 后采集…", options.delay_ms);
+        std::thread::sleep(Duration::from_millis(options.delay_ms));
+    }
+
     let screen = VirtualScreen::current();
     let rect = options
         .region

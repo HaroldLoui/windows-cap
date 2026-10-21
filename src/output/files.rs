@@ -54,6 +54,11 @@ pub fn default_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Pictures")
         .join("Screenshots");
+    path_in(&directory)
+}
+
+/// 在指定目录下生成一张新的截图路径。
+pub fn path_in(directory: &Path) -> PathBuf {
     directory.join(format!("Screen_{}.png", timestamp()))
 }
 
