@@ -8,16 +8,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows::Win32::Graphics::Gdi::HDC;
 use windows::Win32::Graphics::GdiPlus::{
-    FlushIntentionSync, FontStyleRegular, GdipCreateFont, GdipCreateFontFamilyFromName,
-    GdipCreateFromHDC, GdipCreatePen1, GdipCreateSolidFill, GdipCreateStringFormat,
-    GdipDeleteBrush, GdipDeleteFont, GdipDeleteFontFamily, GdipDeleteGraphics, GdipDeletePen,
-    GdipDeleteStringFormat, GdipDrawEllipse, GdipDrawLine, GdipDrawLines, GdipDrawRectangle,
-    GdipDrawString, GdipFillEllipse, GdipFlush, GdipSetPageUnit, GdipSetSmoothingMode,
-    GdipSetStringFormatAlign, GdipSetStringFormatFlags, GdipSetStringFormatLineAlign,
-    GdipSetTextRenderingHint, GdipTranslateWorldTransform, GdiplusStartup, GdiplusStartupInput,
-    GdiplusStartupOutput, GpBrush, GpFont, GpFontCollection, GpFontFamily, GpGraphics, GpPen,
-    GpSolidFill, GpStringFormat, MatrixOrderAppend, PointF, RectF, SmoothingModeAntiAlias, Status,
-    StringAlignmentCenter, StringFormatFlagsNoWrap, TextRenderingHintAntiAliasGridFit, UnitPixel,
+    FillModeAlternate, FlushIntentionSync, FontStyleRegular, GdipCreateFont,
+    GdipCreateFontFamilyFromName, GdipCreateFromHDC, GdipCreatePen1, GdipCreateSolidFill,
+    GdipCreateStringFormat, GdipDeleteBrush, GdipDeleteFont, GdipDeleteFontFamily,
+    GdipDeleteGraphics, GdipDeletePen, GdipDeleteStringFormat, GdipDrawEllipse, GdipDrawLine,
+    GdipDrawLines, GdipDrawRectangle, GdipDrawString, GdipFillEllipse, GdipFillPolygon, GdipFlush,
+    GdipSetPageUnit, GdipSetSmoothingMode, GdipSetStringFormatAlign, GdipSetStringFormatFlags,
+    GdipSetStringFormatLineAlign, GdipSetTextRenderingHint, GdipTranslateWorldTransform,
+    GdiplusStartup, GdiplusStartupInput, GdiplusStartupOutput, GpBrush, GpFont, GpFontCollection,
+    GpFontFamily, GpGraphics, GpPen, GpSolidFill, GpStringFormat, MatrixOrderAppend, PointF, RectF,
+    SmoothingModeAntiAlias, Status, StringAlignmentCenter, StringFormatFlagsNoWrap,
+    TextRenderingHintAntiAliasGridFit, UnitPixel,
 };
 use windows::core::{PCWSTR, w};
 
@@ -97,27 +98,53 @@ fn draw_kind(graphics: *mut GpGraphics, shape: &Shape) -> Result<()> {
 
     unsafe {
         match &shape.kind {
-            ShapeKind::Line { a, b } | ShapeKind::Arrow { a, b } => {
+            ShapeKind::Line { a, b } => {
                 let mut pen: *mut GpPen = null_mut();
                 check(
                     GdipCreatePen1(color, width, UnitPixel, &mut pen),
                     "GdipCreatePen1",
                 )?;
-                let status = if matches!(shape.kind, ShapeKind::Arrow { .. }) {
-                    let arrow_status = GdipDrawLine(
-                        graphics, pen, a.0 as f32, a.1 as f32, b.0 as f32, b.1 as f32,
-                    );
-                    let (p1, p2) = arrow_head(*a, *b, width);
-                    let _ = GdipDrawLine(graphics, pen, b.0 as f32, b.1 as f32, p1.0, p1.1);
-                    let _ = GdipDrawLine(graphics, pen, b.0 as f32, b.1 as f32, p2.0, p2.1);
-                    arrow_status
-                } else {
-                    GdipDrawLine(
-                        graphics, pen, a.0 as f32, a.1 as f32, b.0 as f32, b.1 as f32,
-                    )
-                };
+                let status = GdipDrawLine(
+                    graphics, pen, a.0 as f32, a.1 as f32, b.0 as f32, b.1 as f32,
+                );
                 let _ = GdipDeletePen(pen);
                 check(status, "GdipDrawLine")?;
+            }
+            ShapeKind::Arrow { a, b } => {
+                // 实心三角箭头：主线只画到箭头底边中心，避免尖端出现两段线拼接感。
+                let (p1, p2) = arrow_head(*a, *b, width);
+                let base = ((p1.0 + p2.0) / 2.0, (p1.1 + p2.1) / 2.0);
+                let mut pen: *mut GpPen = null_mut();
+                check(
+                    GdipCreatePen1(color, width, UnitPixel, &mut pen),
+                    "GdipCreatePen1",
+                )?;
+                let status = GdipDrawLine(graphics, pen, a.0 as f32, a.1 as f32, base.0, base.1);
+                let _ = GdipDeletePen(pen);
+                check(status, "GdipDrawLine")?;
+
+                let mut brush: *mut GpSolidFill = null_mut();
+                check(
+                    GdipCreateSolidFill(color, &mut brush),
+                    "GdipCreateSolidFill",
+                )?;
+                let points = [
+                    PointF {
+                        X: b.0 as f32,
+                        Y: b.1 as f32,
+                    },
+                    PointF { X: p1.0, Y: p1.1 },
+                    PointF { X: p2.0, Y: p2.1 },
+                ];
+                let status = GdipFillPolygon(
+                    graphics,
+                    brush as *mut GpBrush,
+                    points.as_ptr(),
+                    3,
+                    FillModeAlternate,
+                );
+                let _ = GdipDeleteBrush(brush as *mut GpBrush);
+                check(status, "GdipFillPolygon")?;
             }
             ShapeKind::Rect { a, b } => {
                 let mut pen: *mut GpPen = null_mut();
@@ -173,7 +200,20 @@ fn draw_kind(graphics: *mut GpGraphics, shape: &Shape) -> Result<()> {
                 )?;
             }
             ShapeKind::Step { center, index } => {
-                let radius = (width * 2.0).max(14.0);
+                let label = index.to_string();
+                let digits = label.chars().count();
+                let base_radius = (width * 2.0).max(14.0);
+                // 两位数/三位数时放大圆圈、缩小字号，保证数字完整居中。
+                let radius = match digits {
+                    1 => base_radius,
+                    2 => base_radius * 1.3,
+                    _ => base_radius * 1.6,
+                };
+                let font_size = match digits {
+                    1 => radius * 1.25,
+                    2 => radius * 0.95,
+                    _ => radius * 0.75,
+                };
                 let mut brush: *mut GpSolidFill = null_mut();
                 check(
                     GdipCreateSolidFill(color, &mut brush),
@@ -196,13 +236,7 @@ fn draw_kind(graphics: *mut GpGraphics, shape: &Shape) -> Result<()> {
                     Width: radius * 2.0,
                     Height: radius * 2.0,
                 };
-                draw_text_centered(
-                    graphics,
-                    &index.to_string(),
-                    rect,
-                    radius * 1.35,
-                    0xFFFF_FFFF,
-                )?;
+                draw_text_centered(graphics, &label, rect, font_size, 0xFFFF_FFFF)?;
             }
             ShapeKind::Mosaic { .. } => {}
         }

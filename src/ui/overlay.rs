@@ -58,6 +58,7 @@ use crate::util::error::Result;
 const CLASS_NAME: PCWSTR = w!("window_cap_overlay");
 const WM_FINISHED: u32 = WM_APP + 1;
 const TIMER_SCRIPT: usize = 1;
+const TIMER_TOOLTIP: usize = 2;
 
 /// 遮罩参数。
 #[derive(Clone, Copy, Debug, Default)]
@@ -123,6 +124,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             width: 4.0,
             drag: None,
             text_editor: None,
+            text_drag: None,
             toolbar: None,
             result: None,
             cross,
@@ -142,6 +144,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             paints: 0,
             paint_total_ms: 0.0,
             toolbar_hover: None,
+            tooltip_action: None,
             cursor: (area.x, area.y),
             previous_foreground,
         });
@@ -251,6 +254,18 @@ struct ShapeDrag {
     points: Vec<Point>,
 }
 
+#[derive(Clone, Copy)]
+enum TextDrag {
+    Move {
+        start: (i32, i32),
+        origin: (i32, i32),
+    },
+    Resize {
+        start: (i32, i32),
+        origin: (i32, i32),
+    },
+}
+
 struct Overlay {
     hwnd: HWND,
     area: VirtualScreen,
@@ -264,8 +279,10 @@ struct Overlay {
     width: f32,
     drag: Option<ShapeDrag>,
     text_editor: Option<TextEditor>,
+    text_drag: Option<TextDrag>,
     toolbar: Option<Toolbar>,
     toolbar_hover: Option<ToolbarAction>,
+    tooltip_action: Option<ToolbarAction>,
     result: Option<OverlayResult>,
     cross: HCURSOR,
     arrow: HCURSOR,
@@ -433,6 +450,7 @@ impl Overlay {
     }
 
     fn close_text_editor(&mut self) {
+        self.text_drag = None;
         if let Some(editor) = self.text_editor.take() {
             drop(editor);
             unsafe {
@@ -442,16 +460,17 @@ impl Overlay {
     }
 
     fn commit_text(&mut self) {
+        self.text_drag = None;
         let Some(editor) = self.text_editor.take() else {
             return;
         };
         let text = editor.text();
         let position = editor.doc_position;
+        let (editor_width, _) = editor.size();
         drop(editor);
 
         let trimmed = text.trim();
         if !trimmed.is_empty() {
-            let editor_width = (320.0 * self.ui_scale) as i32;
             let max_width = self
                 .selection
                 .rect()
@@ -557,6 +576,8 @@ impl Overlay {
             if let Some(toolbar) = &self.toolbar {
                 toolbar.paint(hdc, self.font, self.toolbar_hover);
             }
+            self.draw_tooltip(hdc);
+            self.draw_text_frame(hdc);
         }
     }
 
@@ -700,6 +721,104 @@ impl Overlay {
                 DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
             );
             SelectObject(hdc, old_font);
+        }
+    }
+
+    unsafe fn draw_tooltip(&self, hdc: windows::Win32::Graphics::Gdi::HDC) {
+        let Some(action) = self.tooltip_action else {
+            return;
+        };
+        let Some(toolbar) = &self.toolbar else {
+            return;
+        };
+        let text = tooltip_text(action);
+        if text.is_empty() {
+            return;
+        }
+
+        unsafe {
+            let mut wide: Vec<u16> = text.encode_utf16().collect();
+            let old_font = SelectObject(hdc, HGDIOBJ(self.font.0));
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, COLORREF(0x00FF_FFFF));
+
+            let mut measure = windows::Win32::Foundation::RECT::default();
+            DrawTextW(
+                hdc,
+                &mut wide,
+                &mut measure,
+                DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX,
+            );
+            let padding_x = (9.0 * self.ui_scale).round() as i32;
+            let padding_y = (4.0 * self.ui_scale).round() as i32;
+            let width = (measure.right - measure.left).max(0) + padding_x * 2;
+            let height = (measure.bottom - measure.top).max(0) + padding_y * 2;
+
+            let gap = (6.0 * self.ui_scale).round() as i32;
+            let mut x = toolbar.rect.x + (toolbar.rect.width - width) / 2;
+            let mut y = toolbar.rect.y + toolbar.rect.height + gap;
+            if y + height > self.area.height - 4 {
+                y = toolbar.rect.y - height - gap;
+            }
+            x = x.clamp(4, (self.area.width - width - 4).max(4));
+            y = y.clamp(4, (self.area.height - height - 4).max(4));
+
+            let rect = windows::Win32::Foundation::RECT {
+                left: x,
+                top: y,
+                right: x + width,
+                bottom: y + height,
+            };
+            let _ = FillRect(hdc, &rect, self.dark);
+            let _ = FrameRect(hdc, &rect, self.accent);
+            let mut text_rect = rect;
+            DrawTextW(
+                hdc,
+                &mut wide,
+                &mut text_rect,
+                DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+            );
+            SelectObject(hdc, old_font);
+        }
+    }
+
+    unsafe fn draw_text_frame(&self, hdc: windows::Win32::Graphics::Gdi::HDC) {
+        let Some(editor) = &self.text_editor else {
+            return;
+        };
+        let rect = editor.client_rect();
+        let frame = RectI::new(rect.x - 4, rect.y - 4, rect.width + 8, rect.height + 8);
+        let frame_rect = windows::Win32::Foundation::RECT {
+            left: frame.x,
+            top: frame.y,
+            right: frame.x + frame.width,
+            bottom: frame.y + frame.height,
+        };
+        unsafe {
+            let _ = FrameRect(hdc, &frame_rect, self.accent);
+            for (x, y) in [
+                (frame.x, frame.y),
+                (frame.x + frame.width - 5, frame.y),
+                (frame.x, frame.y + frame.height - 5),
+                (frame.x + frame.width - 5, frame.y + frame.height - 5),
+            ] {
+                let dot = windows::Win32::Foundation::RECT {
+                    left: x,
+                    top: y,
+                    right: x + 5,
+                    bottom: y + 5,
+                };
+                let _ = FillRect(hdc, &dot, self.white);
+                let _ = FrameRect(hdc, &dot, self.accent);
+            }
+            let grip_rect = windows::Win32::Foundation::RECT {
+                left: rect.x + rect.width + 2,
+                top: rect.y + rect.height + 2,
+                right: rect.x + rect.width + 14,
+                bottom: rect.y + rect.height + 14,
+            };
+            let _ = FillRect(hdc, &grip_rect, self.white);
+            let _ = FrameRect(hdc, &grip_rect, self.accent);
         }
     }
 
@@ -900,7 +1019,35 @@ impl Overlay {
     }
 
     fn on_mouse_down(&mut self, screen: (i32, i32)) {
-        if self.text_editor.is_some() {
+        self.tooltip_action = None;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_TOOLTIP);
+        }
+
+        if let Some(editor) = &self.text_editor {
+            let client = (screen.0 - self.area.x, screen.1 - self.area.y);
+            let rect = editor.client_rect();
+            let frame = RectI::new(rect.x - 4, rect.y - 4, rect.width + 8, rect.height + 8);
+            let grip = RectI::new(rect.x + rect.width + 2, rect.y + rect.height + 2, 12, 12);
+            if inside(grip, client) {
+                self.text_drag = Some(TextDrag::Resize {
+                    start: client,
+                    origin: (rect.width, rect.height),
+                });
+                unsafe {
+                    SetCapture(self.hwnd);
+                }
+                return;
+            }
+            if inside(frame, client) && !inside(rect, client) {
+                self.text_drag = Some(TextDrag::Move {
+                    start: client,
+                    origin: (rect.x, rect.y),
+                });
+                unsafe {
+                    SetCapture(self.hwnd);
+                }
+            }
             return;
         }
         ::log::debug!(
@@ -956,6 +1103,37 @@ impl Overlay {
         self.cursor = screen;
         let mut needs_paint = false;
 
+        if let Some(drag) = self.text_drag {
+            let client = (screen.0 - self.area.x, screen.1 - self.area.y);
+            let area = self.area;
+            let scale = self.ui_scale;
+            if let Some(editor) = self.text_editor.as_mut() {
+                match drag {
+                    TextDrag::Move { start, origin } => {
+                        let (width, height) = editor.size();
+                        let x =
+                            (origin.0 + client.0 - start.0).clamp(0, (area.width - width).max(0));
+                        let y =
+                            (origin.1 + client.1 - start.1).clamp(0, (area.height - height).max(0));
+                        editor.move_to((x, y));
+                    }
+                    TextDrag::Resize { start, origin } => {
+                        let (position_x, position_y) = editor.position();
+                        let min_width = (120.0 * scale) as i32;
+                        let min_height = (48.0 * scale) as i32;
+                        let width = (origin.0 + client.0 - start.0)
+                            .clamp(min_width, (area.width - position_x).max(min_width));
+                        let height = (origin.1 + client.1 - start.1)
+                            .clamp(min_height, (area.height - position_y).max(min_height));
+                        editor.resize_to((width, height));
+                    }
+                }
+            }
+            self.invalidate();
+            self.update_cursor();
+            return;
+        }
+
         if self.drag.is_some() {
             self.update_drag(screen);
             needs_paint = true;
@@ -972,7 +1150,14 @@ impl Overlay {
             .and_then(|toolbar| toolbar.hit(client.0, client.1));
         if hover != self.toolbar_hover {
             self.toolbar_hover = hover;
+            self.tooltip_action = None;
             needs_paint = true;
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_TOOLTIP);
+                if hover.is_some() && !matches!(hover, Some(ToolbarAction::Noop)) {
+                    SetTimer(Some(self.hwnd), TIMER_TOOLTIP, 600, None);
+                }
+            }
         }
         if needs_paint {
             self.invalidate();
@@ -982,6 +1167,19 @@ impl Overlay {
     }
 
     fn on_mouse_up(&mut self, screen: (i32, i32)) {
+        if self.text_drag.take().is_some() {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            if let Some(editor) = &self.text_editor {
+                unsafe {
+                    let _ = SetFocus(Some(editor.hwnd));
+                }
+            }
+            self.invalidate();
+            return;
+        }
+
         if self.drag.is_some() {
             self.update_drag(screen);
             self.finish_drag();
@@ -1093,13 +1291,31 @@ impl Overlay {
 
     fn update_cursor(&self) {
         let client = (self.cursor.0 - self.area.x, self.cursor.1 - self.area.y);
+
+        if let Some(editor) = &self.text_editor {
+            let rect = editor.client_rect();
+            let frame = RectI::new(rect.x - 4, rect.y - 4, rect.width + 8, rect.height + 8);
+            let grip = RectI::new(rect.x + rect.width + 2, rect.y + rect.height + 2, 12, 12);
+            let cursor = if inside(grip, client) {
+                self.size_nwse
+            } else if inside(frame, client) && !inside(rect, client) {
+                self.size_all
+            } else {
+                self.arrow
+            };
+            unsafe {
+                let _ = SetCursor(Some(cursor));
+            }
+            return;
+        }
+
         let over_toolbar = self
             .toolbar
             .as_ref()
             .map(|toolbar| toolbar.hit(client.0, client.1).is_some())
             .unwrap_or(false);
 
-        let cursor = if over_toolbar || self.text_editor.is_some() {
+        let cursor = if over_toolbar {
             self.arrow
         } else {
             match self.selection.rect() {
@@ -1256,6 +1472,30 @@ fn argb_to_colorref(argb: u32) -> COLORREF {
     COLORREF((b << 16) | (g << 8) | r)
 }
 
+fn tooltip_text(action: ToolbarAction) -> String {
+    match action {
+        ToolbarAction::Tool(tool) => format!(
+            "{} ({})",
+            tool.name(),
+            char::from_u32(tool.shortcut() as u32).unwrap_or('?')
+        ),
+        ToolbarAction::Color(_) => "颜色".to_string(),
+        ToolbarAction::Width(delta) => {
+            if delta < 0 {
+                "线宽 −".to_string()
+            } else {
+                "线宽 +".to_string()
+            }
+        }
+        ToolbarAction::Undo => "撤销 (Ctrl+Z)".to_string(),
+        ToolbarAction::Redo => "重做 (Ctrl+Y)".to_string(),
+        ToolbarAction::Copy => "复制 (Ctrl+C)".to_string(),
+        ToolbarAction::Save => "保存 (Ctrl+S)".to_string(),
+        ToolbarAction::Cancel => "关闭 (Esc)".to_string(),
+        ToolbarAction::Noop => String::new(),
+    }
+}
+
 fn loword(value: isize) -> i32 {
     ((value as usize) & 0xFFFF) as u16 as i16 as i32
 }
@@ -1353,10 +1593,18 @@ unsafe extern "system" fn overlay_wndproc(
                 LRESULT(1)
             }
             WM_TIMER => {
-                if let Some(overlay) = state(hwnd)
-                    && wparam.0 == TIMER_SCRIPT
-                {
-                    overlay.confirm();
+                if let Some(overlay) = state(hwnd) {
+                    match wparam.0 {
+                        TIMER_SCRIPT => overlay.confirm(),
+                        TIMER_TOOLTIP => {
+                            let _ = KillTimer(Some(hwnd), TIMER_TOOLTIP);
+                            if overlay.toolbar_hover.is_some() {
+                                overlay.tooltip_action = overlay.toolbar_hover;
+                                overlay.invalidate();
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 LRESULT(0)
             }

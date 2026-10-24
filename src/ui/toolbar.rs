@@ -72,6 +72,21 @@ impl Tool {
             Tool::Step => b'N' as u16,
         }
     }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Tool::Select => "选择",
+            Tool::Pen => "画笔",
+            Tool::Line => "直线",
+            Tool::Arrow => "箭头",
+            Tool::Rect => "矩形",
+            Tool::Ellipse => "椭圆",
+            Tool::Highlight => "高亮",
+            Tool::Text => "文字",
+            Tool::Mosaic => "马赛克",
+            Tool::Step => "序号",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
