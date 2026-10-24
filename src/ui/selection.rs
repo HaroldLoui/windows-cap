@@ -85,6 +85,7 @@ enum Mode {
 }
 
 const HANDLE_TOLERANCE: i32 = 6;
+pub const HANDLE_HIT_TOLERANCE: i32 = HANDLE_TOLERANCE;
 const MIN_SIZE: i32 = 3;
 
 #[derive(Default)]
@@ -113,6 +114,19 @@ impl SelectionState {
     /// 是否有正在进行的拖拽（创建/移动/缩放）。
     pub fn is_active(&self) -> bool {
         !matches!(self.mode, Mode::Idle)
+    }
+
+    /// 正在拖拽的手柄（缩放中）。
+    pub fn active_handle(&self) -> Option<Handle> {
+        match self.mode {
+            Mode::Resizing { handle, .. } => Some(handle),
+            _ => None,
+        }
+    }
+
+    /// 是否正在移动选区。
+    pub fn is_moving(&self) -> bool {
+        matches!(self.mode, Mode::Moving { .. })
     }
 
     /// 正在绘制/生效的选区（创建过程中返回实时矩形）。

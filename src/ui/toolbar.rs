@@ -134,6 +134,9 @@ pub struct Toolbar {
     buttons: Vec<Button>,
     row1_divider: i32,
     row2_divider: i32,
+    row1_y: i32,
+    row2_y: i32,
+    cell: i32,
     scale: f32,
 }
 
@@ -265,6 +268,9 @@ impl Toolbar {
             buttons,
             row1_divider,
             row2_divider,
+            row1_y,
+            row2_y,
+            cell,
             scale,
         }
     }
@@ -321,15 +327,18 @@ impl Toolbar {
                 1.0 * s,
             );
 
-            let sep_top = rect.y as f32 + 8.0 * s;
-            let sep_bottom = rect.y as f32 + rect.height as f32 - 8.0 * s;
-            for divider in [self.row1_divider, self.row2_divider] {
+            // 分隔线只占各自那一行的高度。
+            let inset = (5.0 * s).round() as i32;
+            for (divider, row_y) in [
+                (self.row1_divider, self.row1_y),
+                (self.row2_divider, self.row2_y),
+            ] {
                 stroke_line(
                     graphics,
                     divider as f32,
-                    sep_top,
+                    (row_y + inset) as f32,
                     divider as f32,
-                    sep_bottom,
+                    (row_y + self.cell - inset) as f32,
                     SEPARATOR,
                     1.0 * s,
                 );

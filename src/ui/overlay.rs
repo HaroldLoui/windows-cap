@@ -37,20 +37,20 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, GWLP_USERDATA, GetForegroundWindow, GetMessageW, GetWindowLongPtrW,
-    GetWindowThreadProcessId, HCURSOR, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IsWindow,
-    KillTimer, LoadCursorW, MSG, PostThreadMessageW, RegisterClassW, SW_SHOW, SWP_SHOWWINDOW,
-    SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, WM_APP, WM_CREATE, WM_CTLCOLOREDIT, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST,
-    WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    GetWindowThreadProcessId, HCURSOR, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IDC_SIZEALL,
+    IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IsWindow, KillTimer, LoadCursorW, MSG,
+    PostThreadMessageW, RegisterClassW, SW_SHOW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CREATE,
+    WM_CTLCOLOREDIT, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
+    WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
 use crate::annotate::{Document, Point, Shape, ShapeKind, render};
 use crate::capture::{Frame, RectI, VirtualScreen};
 use crate::platform::dib::Dib;
-use crate::ui::selection::{EndResult, Handle, SelectionState};
+use crate::ui::selection::{EndResult, HANDLE_HIT_TOLERANCE, Handle, SelectionState};
 use crate::ui::text_edit::{TextEditor, WM_TEXT_CANCEL, WM_TEXT_COMMIT};
 use crate::ui::toolbar::{COLORS, TOOLS, Tool, Toolbar, ToolbarAction, ToolbarState};
 use crate::util::error::Result;
@@ -96,6 +96,18 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
 
         let cross = LoadCursorW(None, IDC_CROSS).unwrap_or(HCURSOR(null_mut()));
         let arrow = LoadCursorW(None, IDC_ARROW).unwrap_or(HCURSOR(null_mut()));
+        let size_nwse = LoadCursorW(None, IDC_SIZENWSE).unwrap_or(HCURSOR(null_mut()));
+        let size_nesw = LoadCursorW(None, IDC_SIZENESW).unwrap_or(HCURSOR(null_mut()));
+        let size_ns = LoadCursorW(None, IDC_SIZENS).unwrap_or(HCURSOR(null_mut()));
+        let size_we = LoadCursorW(None, IDC_SIZEWE).unwrap_or(HCURSOR(null_mut()));
+        let size_all = LoadCursorW(None, IDC_SIZEALL).unwrap_or(HCURSOR(null_mut()));
+        ::log::debug!(
+            "overlay cursors: cross={:?} arrow={:?} nwse={:?} all={:?}",
+            cross,
+            arrow,
+            size_nwse,
+            size_all
+        );
         let previous_foreground = GetForegroundWindow();
 
         let mut overlay = Box::new(Overlay {
@@ -115,6 +127,11 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             result: None,
             cross,
             arrow,
+            size_nwse,
+            size_nesw,
+            size_ns,
+            size_we,
+            size_all,
             font: HFONT(null_mut()),
             accent: CreateSolidBrush(COLORREF(0x00FF_9B2E)),
             white: CreateSolidBrush(COLORREF(0x00FF_FFFF)),
@@ -252,6 +269,11 @@ struct Overlay {
     result: Option<OverlayResult>,
     cross: HCURSOR,
     arrow: HCURSOR,
+    size_nwse: HCURSOR,
+    size_nesw: HCURSOR,
+    size_ns: HCURSOR,
+    size_we: HCURSOR,
+    size_all: HCURSOR,
     font: HFONT,
     accent: HBRUSH,
     white: HBRUSH,
@@ -956,19 +978,6 @@ impl Overlay {
             self.invalidate();
         }
 
-        if let Some(rect) = self.selection.rect()
-            && self.has_shapes()
-        {
-            let cursor = if inside(rect, screen) {
-                self.cross
-            } else {
-                self.arrow
-            };
-            unsafe {
-                let _ = SetCursor(Some(cursor));
-            }
-            return;
-        }
         self.update_cursor();
     }
 
@@ -1089,7 +1098,47 @@ impl Overlay {
             .as_ref()
             .map(|toolbar| toolbar.hit(client.0, client.1).is_some())
             .unwrap_or(false);
-        let cursor = if over_toolbar { self.arrow } else { self.cross };
+
+        let cursor = if over_toolbar || self.text_editor.is_some() {
+            self.arrow
+        } else {
+            match self.selection.rect() {
+                Some(rect) if !self.has_shapes() => {
+                    let handle = self.selection.active_handle().or_else(|| {
+                        SelectionState::handle_at(
+                            rect,
+                            self.cursor.0,
+                            self.cursor.1,
+                            HANDLE_HIT_TOLERANCE,
+                        )
+                    });
+                    match handle {
+                        Some(Handle::NorthWest | Handle::SouthEast) => self.size_nwse,
+                        Some(Handle::NorthEast | Handle::SouthWest) => self.size_nesw,
+                        Some(Handle::North | Handle::South) => self.size_ns,
+                        Some(Handle::East | Handle::West) => self.size_we,
+                        None => {
+                            if self.selection.is_moving()
+                                || (self.tool == Tool::Select && inside(rect, self.cursor))
+                            {
+                                self.size_all
+                            } else {
+                                self.cross
+                            }
+                        }
+                    }
+                }
+                Some(rect) if self.has_shapes() => {
+                    if inside(rect, self.cursor) {
+                        self.cross
+                    } else {
+                        self.arrow
+                    }
+                }
+                _ => self.cross,
+            }
+        };
+
         unsafe {
             let _ = SetCursor(Some(cursor));
         }
