@@ -156,8 +156,21 @@ fn draw_kind(graphics: *mut GpGraphics, shape: &Shape) -> Result<()> {
                 let _ = GdipDeletePen(pen);
                 check(status, "GdipDrawLines")?;
             }
-            ShapeKind::Text { pos, text, size } => {
-                draw_text_at(graphics, text, pos.0 as f32, pos.1 as f32, *size, color)?;
+            ShapeKind::Text {
+                pos,
+                text,
+                size,
+                max_width,
+            } => {
+                draw_text_at(
+                    graphics,
+                    text,
+                    pos.0 as f32,
+                    pos.1 as f32,
+                    *size,
+                    color,
+                    *max_width,
+                )?;
             }
             ShapeKind::Step { center, index } => {
                 let radius = (width * 2.0).max(14.0);
@@ -205,14 +218,15 @@ fn draw_text_at(
     y: f32,
     size: f32,
     color: u32,
+    max_width: f32,
 ) -> Result<()> {
     let rect = RectF {
         X: x,
         Y: y,
-        Width: 4000.0,
+        Width: if max_width > 0.0 { max_width } else { 4000.0 },
         Height: 4000.0,
     };
-    draw_text(graphics, text, rect, size, color, false)
+    draw_text(graphics, text, rect, size, color, false, max_width > 0.0)
 }
 
 fn draw_text_centered(
@@ -222,7 +236,7 @@ fn draw_text_centered(
     size: f32,
     color: u32,
 ) -> Result<()> {
-    draw_text(graphics, text, rect, size, color, true)
+    draw_text(graphics, text, rect, size, color, true, false)
 }
 
 fn draw_text(
@@ -232,6 +246,7 @@ fn draw_text(
     size: f32,
     color: u32,
     centered: bool,
+    wrap: bool,
 ) -> Result<()> {
     unsafe {
         let mut family: *mut GpFontFamily = null_mut();
@@ -249,7 +264,9 @@ fn draw_text(
 
         let mut format: *mut GpStringFormat = null_mut();
         let format_status = GdipCreateStringFormat(0, 0, &mut format);
-        let _ = GdipSetStringFormatFlags(format, StringFormatFlagsNoWrap.0);
+        if !wrap {
+            let _ = GdipSetStringFormatFlags(format, StringFormatFlagsNoWrap.0);
+        }
         if centered {
             let _ = GdipSetStringFormatAlign(format, StringAlignmentCenter);
             let _ = GdipSetStringFormatLineAlign(format, StringAlignmentCenter);

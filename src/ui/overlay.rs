@@ -421,11 +421,18 @@ impl Overlay {
 
         let trimmed = text.trim();
         if !trimmed.is_empty() {
+            let editor_width = (320.0 * self.ui_scale) as i32;
+            let max_width = self
+                .selection
+                .rect()
+                .map(|rect| (rect.width - position.0).clamp(40, editor_width) as f32)
+                .unwrap_or(editor_width as f32);
             let shape = Shape::new(
                 ShapeKind::Text {
                     pos: (position.0, position.1),
                     text,
                     size: 24.0 * self.ui_scale,
+                    max_width,
                 },
                 self.color,
                 self.width,

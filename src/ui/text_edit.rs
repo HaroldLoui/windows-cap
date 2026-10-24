@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DeleteObject,
-    FF_DONTCARE, FW_NORMAL, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, SRCCOPY,
+    FF_DONTCARE, FW_NORMAL, GetClipBox, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::Ime::{
@@ -20,9 +20,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DestroyWindow, ES_AUTOVSCROLL, ES_MULTILINE, GWLP_WNDPROC,
-    GetClientRect, GetParent, GetWindowTextLengthW, GetWindowTextW, PostMessageW, SendMessageW,
-    SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_SETFONT, WNDPROC, WS_CHILD, WS_VISIBLE,
+    GetParent, GetWindowTextLengthW, GetWindowTextW, PostMessageW, SendMessageW, SetWindowLongPtrW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_ERASEBKGND, WM_KEYDOWN, WM_SETFONT, WNDPROC,
+    WS_CHILD, WS_VISIBLE,
 };
 use windows::core::w;
 
@@ -57,7 +57,7 @@ impl TextEditor {
     ) -> Result<Self> {
         let scale = scale.max(1.0);
         let width = ((320.0 * scale).round() as i32).max(160);
-        let height = ((font_size * 1.8).round() as i32).max(28);
+        let height = ((font_size * 1.7 * 3.0).round() as i32).max(64);
         let font_height = -((font_size).round() as i32).max(10);
 
         unsafe {
@@ -166,20 +166,25 @@ unsafe extern "system" fn edit_wndproc(
             WM_ERASEBKGND => {
                 let background = HDC(BACKGROUND_DC.load(Ordering::SeqCst) as *mut _);
                 if !background.0.is_null() {
-                    let mut rect = RECT::default();
-                    if GetClientRect(hwnd, &mut rect).is_ok() {
-                        let hdc = HDC(wparam.0 as *mut _);
-                        let _ = BitBlt(
-                            hdc,
-                            0,
-                            0,
-                            rect.right,
-                            rect.bottom,
-                            Some(background),
-                            BACKGROUND_X.load(Ordering::SeqCst),
-                            BACKGROUND_Y.load(Ordering::SeqCst),
-                            SRCCOPY,
-                        );
+                    let hdc = HDC(wparam.0 as *mut _);
+                    // 只重绘失效区域；整块重绘会把编辑框里已有的文字擦掉。
+                    let mut clip = RECT::default();
+                    if GetClipBox(hdc, &mut clip).0 > 1 {
+                        let width = clip.right - clip.left;
+                        let height = clip.bottom - clip.top;
+                        if width > 0 && height > 0 {
+                            let _ = BitBlt(
+                                hdc,
+                                clip.left,
+                                clip.top,
+                                width,
+                                height,
+                                Some(background),
+                                BACKGROUND_X.load(Ordering::SeqCst) + clip.left,
+                                BACKGROUND_Y.load(Ordering::SeqCst) + clip.top,
+                                SRCCOPY,
+                            );
+                        }
                     }
                 }
                 return LRESULT(1);

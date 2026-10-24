@@ -26,15 +26,44 @@ impl Stroke {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShapeKind {
-    Line { a: Point, b: Point },
-    Arrow { a: Point, b: Point },
-    Rect { a: Point, b: Point },
-    Ellipse { a: Point, b: Point },
-    Pen { points: Vec<Point> },
-    Highlight { points: Vec<Point> },
-    Text { pos: Point, text: String, size: f32 },
-    Mosaic { a: Point, b: Point, block: u32 },
-    Step { center: Point, index: u32 },
+    Line {
+        a: Point,
+        b: Point,
+    },
+    Arrow {
+        a: Point,
+        b: Point,
+    },
+    Rect {
+        a: Point,
+        b: Point,
+    },
+    Ellipse {
+        a: Point,
+        b: Point,
+    },
+    Pen {
+        points: Vec<Point>,
+    },
+    Highlight {
+        points: Vec<Point>,
+    },
+    Text {
+        pos: Point,
+        text: String,
+        size: f32,
+        /// 自动换行宽度（像素）；0 表示不换行。
+        max_width: f32,
+    },
+    Mosaic {
+        a: Point,
+        b: Point,
+        block: u32,
+    },
+    Step {
+        center: Point,
+        index: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
