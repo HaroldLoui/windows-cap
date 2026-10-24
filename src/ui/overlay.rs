@@ -124,6 +124,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             first_paint_ms: None,
             paints: 0,
             paint_total_ms: 0.0,
+            toolbar_hover: None,
             cursor: (area.x, area.y),
             previous_foreground,
         });
@@ -247,6 +248,7 @@ struct Overlay {
     drag: Option<ShapeDrag>,
     text_editor: Option<TextEditor>,
     toolbar: Option<Toolbar>,
+    toolbar_hover: Option<ToolbarAction>,
     result: Option<OverlayResult>,
     cross: HCURSOR,
     arrow: HCURSOR,
@@ -336,7 +338,12 @@ impl Overlay {
     }
 
     fn refresh_toolbar(&mut self) {
-        self.toolbar = self.selection.rect().map(|rect| {
+        let layout_rect = if self.selection.rect().is_some() {
+            self.selection.current_rect()
+        } else {
+            None
+        };
+        self.toolbar = layout_rect.map(|rect| {
             let state = ToolbarState {
                 tool: self.tool,
                 color: self.color,
@@ -354,6 +361,7 @@ impl Overlay {
             };
             Toolbar::layout(rect, self.area, self.ui_scale, &state)
         });
+        self.toolbar_hover = None;
     }
 
     fn confirm(&mut self) {
@@ -525,7 +533,7 @@ impl Overlay {
 
             self.draw_chrome(hdc, current);
             if let Some(toolbar) = &self.toolbar {
-                toolbar.paint(hdc, self.font);
+                toolbar.paint(hdc, self.font, self.toolbar_hover);
             }
         }
     }
@@ -924,12 +932,27 @@ impl Overlay {
 
     fn on_mouse_move(&mut self, screen: (i32, i32)) {
         self.cursor = screen;
+        let mut needs_paint = false;
 
         if self.drag.is_some() {
             self.update_drag(screen);
-            self.invalidate();
+            needs_paint = true;
         } else if self.selection.is_active() {
             self.selection.update(screen.0, screen.1, self.area);
+            self.refresh_toolbar();
+            needs_paint = true;
+        }
+
+        let client = (screen.0 - self.area.x, screen.1 - self.area.y);
+        let hover = self
+            .toolbar
+            .as_ref()
+            .and_then(|toolbar| toolbar.hit(client.0, client.1));
+        if hover != self.toolbar_hover {
+            self.toolbar_hover = hover;
+            needs_paint = true;
+        }
+        if needs_paint {
             self.invalidate();
         }
 
