@@ -16,7 +16,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_ESCAPE,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
@@ -39,13 +39,22 @@ use crate::util::error::Result;
 const PIN_CLASS: PCWSTR = w!("window_cap_pin");
 const HINT_CLASS: PCWSTR = w!("window_cap_pin_hint");
 const ZOOM_CLASS: PCWSTR = w!("window_cap_pin_zoom");
+const ACTIONS_CLASS: PCWSTR = w!("window_cap_pin_actions");
 const SHADOW: i32 = 18;
 const MIN_SIZE: i32 = 40;
 const MAX_SIZE: i32 = 8000;
 const HINT_TIMER: usize = 1;
 const ZOOM_TIMER: usize = 1;
 const ZOOM_HIDE_MS: u32 = 900;
+const ACTIONS_WIDTH: i32 = 150;
+const ACTIONS_HEIGHT: i32 = 30;
 const HINT_TEXT: &str = "已贴图 · 拖动移动 · Ctrl+滚轮缩放 · Esc/双击关闭";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HintPlacement {
+    Right,
+    Above,
+}
 
 struct DragState {
     cursor: (i32, i32),
@@ -57,6 +66,11 @@ struct PinState {
     drag: Option<DragState>,
     hint: HWND,
     zoom: HWND,
+    actions: HWND,
+}
+
+struct ActionsState {
+    pin: HWND,
 }
 
 /// 创建一个贴图窗口（不阻塞，常驻消息循环继续处理）。
@@ -66,12 +80,14 @@ pub fn show(image: Frame) -> Result<()> {
         register_class(hinstance, PIN_CLASS, pin_wndproc);
         register_class(hinstance, HINT_CLASS, hint_wndproc);
         register_class(hinstance, ZOOM_CLASS, zoom_wndproc);
+        register_class(hinstance, ACTIONS_CLASS, actions_wndproc);
 
         let raw_state = Box::into_raw(Box::new(PinState {
             image,
             drag: None,
             hint: HWND(null_mut()),
             zoom: HWND(null_mut()),
+            actions: HWND(null_mut()),
         }));
         let width = (*raw_state).image.width as i32;
         let height = (*raw_state).image.height as i32;
@@ -107,11 +123,14 @@ pub fn show(image: Frame) -> Result<()> {
                     SWP_SHOWWINDOW | SWP_NOACTIVATE,
                 );
                 update_layer(hwnd);
-                let hint = show_hint(x, y, window_width);
+                let hint = show_hint(hwnd, HintPlacement::Right, HINT_TEXT, 3200);
+                let actions = create_actions(hwnd);
                 if let Some(pin) = state(hwnd) {
                     pin.hint = hint;
+                    pin.actions = actions;
                 }
                 let _ = SetForegroundWindow(hwnd);
+                let _ = SetFocus(Some(hwnd));
                 ::log::info!(
                     "pinned window created: {}x{} at ({}, {})",
                     width,
@@ -334,6 +353,7 @@ unsafe extern "system" fn pin_wndproc(
                     }
                 }
                 let _ = SetForegroundWindow(hwnd);
+                let _ = SetFocus(Some(hwnd));
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
@@ -353,6 +373,7 @@ unsafe extern "system" fn pin_wndproc(
                             0,
                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
                         );
+                        reposition_actions(hwnd);
                     }
                 }
                 LRESULT(0)
@@ -400,6 +421,7 @@ unsafe extern "system" fn pin_wndproc(
                             SWP_NOZORDER | SWP_NOACTIVATE,
                         );
                         update_layer(hwnd);
+                        reposition_actions(hwnd);
                         let percent = ((new_content_w as f32 / pin.image.width as f32) * 100.0)
                             .round() as i32;
                         show_zoom(hwnd, percent);
@@ -412,11 +434,10 @@ unsafe extern "system" fn pin_wndproc(
                 let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
                 if key == VK_ESCAPE.0 {
                     let _ = DestroyWindow(hwnd);
-                } else if ctrl
-                    && key == b'C' as u16
-                    && let Some(pin) = state(hwnd)
-                {
-                    let _ = clipboard::put(&pin.image);
+                } else if key == 0x0D || (ctrl && key == b'S' as u16) {
+                    pin_save(hwnd);
+                } else if ctrl && key == b'C' as u16 {
+                    pin_copy(hwnd);
                 }
                 LRESULT(0)
             }
@@ -434,6 +455,9 @@ unsafe extern "system" fn pin_wndproc(
                     }
                     if IsWindow(Some(state.zoom)).as_bool() {
                         let _ = DestroyWindow(state.zoom);
+                    }
+                    if IsWindow(Some(state.actions)).as_bool() {
+                        let _ = DestroyWindow(state.actions);
                     }
                     drop(state);
                 }
@@ -568,8 +592,53 @@ unsafe extern "system" fn zoom_wndproc(
     }
 }
 
-/// 在贴图外侧显示一个自动消失的提示条。
-unsafe fn show_hint(pin_x: i32, pin_y: i32, pin_w: i32) -> HWND {
+unsafe fn pin_copy(pin: HWND) {
+    unsafe {
+        if let Some(state) = state(pin) {
+            let _ = clipboard::put(&state.image);
+        }
+        show_toast(pin, "已复制");
+    }
+}
+
+unsafe fn pin_save(pin: HWND) {
+    unsafe {
+        let mut saved = false;
+        if let Some(state) = state(pin) {
+            let path = files::default_path();
+            match files::save_png(&state.image, &path) {
+                Ok(_) => saved = true,
+                Err(error) => ::log::warn!("pin save failed: {error}"),
+            }
+        }
+        show_toast(
+            pin,
+            if saved {
+                "已保存 PNG"
+            } else {
+                "保存失败"
+            },
+        );
+    }
+}
+
+unsafe fn show_toast(pin: HWND, text: &str) {
+    unsafe {
+        if let Some(state) = state(pin)
+            && IsWindow(Some(state.hint)).as_bool()
+        {
+            let _ = DestroyWindow(state.hint);
+            state.hint = HWND(null_mut());
+        }
+        let hint = show_hint(pin, HintPlacement::Above, text, 1800);
+        if let Some(state) = state(pin) {
+            state.hint = hint;
+        }
+    }
+}
+
+/// 创建提示条（可放在贴图右侧或上方），到时自动消失。
+unsafe fn show_hint(pin: HWND, placement: HintPlacement, text: &str, duration: u32) -> HWND {
     unsafe {
         let Ok(hinstance) = GetModuleHandleW(None).map(|module| HINSTANCE(module.0)) else {
             return HWND(null_mut());
@@ -580,44 +649,55 @@ unsafe fn show_hint(pin_x: i32, pin_y: i32, pin_w: i32) -> HWND {
         let screen_height = windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
             windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN,
         );
+        let mut pin_rect = RECT::default();
+        if GetWindowRect(pin, &mut pin_rect).is_err() {
+            return HWND(null_mut());
+        }
+        let content_left = pin_rect.left + SHADOW;
+        let content_top = pin_rect.top + SHADOW;
+        let content_bottom = pin_rect.bottom - SHADOW;
+        let content_width = (pin_rect.right - pin_rect.left - SHADOW * 2).max(1);
 
         let measure_dc = GetDC(None);
-        let mut rect = RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        let mut measure_text = wide(HINT_TEXT);
+        let mut measured = RECT::default();
+        let mut measured_text = wide(text);
         let old_font = SelectObject(measure_dc, GetStockObject(DEFAULT_GUI_FONT));
         DrawTextW(
             measure_dc,
-            &mut measure_text,
-            &mut rect,
+            &mut measured_text,
+            &mut measured,
             DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
         );
         SelectObject(measure_dc, old_font);
         let _ = ReleaseDC(None, measure_dc);
 
-        let width = (rect.right - rect.left) + 24;
-        let height = (rect.bottom - rect.top) + 14;
-        let image_right = pin_x + SHADOW + pin_w - SHADOW * 2;
-        let mut x = image_right + 12;
-        let mut y = pin_y + SHADOW;
+        let width = (measured.right - measured.left) + 24;
+        let height = (measured.bottom - measured.top) + 14;
+        let (mut x, mut y) = match placement {
+            HintPlacement::Right => (content_left + content_width + 12, content_top),
+            HintPlacement::Above => (
+                content_left + (content_width - width) / 2,
+                content_top - height - 8,
+            ),
+        };
         if x + width > screen_width - 8 {
-            x = pin_x + SHADOW - width - 12;
+            x = content_left - width - 12;
         }
         if x < 8 {
             x = 8;
+        }
+        if y < 8 {
+            y = content_bottom + 8;
         }
         if y + height > screen_height - 8 {
             y = screen_height - height - 8;
         }
 
+        let title = wide(text);
         let hint = match CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             HINT_CLASS,
-            w!("window-cap pin hint"),
+            PCWSTR(title.as_ptr()),
             WS_POPUP | WS_VISIBLE,
             x,
             y,
@@ -632,8 +712,178 @@ unsafe fn show_hint(pin_x: i32, pin_y: i32, pin_w: i32) -> HWND {
             Err(_) => return HWND(null_mut()),
         };
         let _ = ShowWindow(hint, SW_SHOWNOACTIVATE);
-        SetTimer(Some(hint), HINT_TIMER, 3200, None);
+        SetTimer(Some(hint), HINT_TIMER, duration, None);
         hint
+    }
+}
+
+fn actions_position(pin_rect: &RECT) -> (i32, i32) {
+    let content_top = pin_rect.top + SHADOW;
+    let content_bottom = pin_rect.bottom - SHADOW;
+    let content_right = pin_rect.right - SHADOW;
+    let x = (content_right - ACTIONS_WIDTH).max(8);
+    let mut y = content_top - ACTIONS_HEIGHT - 8;
+    if y < 8 {
+        y = content_bottom + 8;
+    }
+    (x, y)
+}
+
+unsafe fn create_actions(pin: HWND) -> HWND {
+    unsafe {
+        let Ok(hinstance) = GetModuleHandleW(None).map(|module| HINSTANCE(module.0)) else {
+            return HWND(null_mut());
+        };
+        let mut pin_rect = RECT::default();
+        if GetWindowRect(pin, &mut pin_rect).is_err() {
+            return HWND(null_mut());
+        }
+        let (x, y) = actions_position(&pin_rect);
+        let raw_state = Box::into_raw(Box::new(ActionsState { pin }));
+        let actions = match CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            ACTIONS_CLASS,
+            w!("window-cap pin actions"),
+            WS_POPUP | WS_VISIBLE,
+            x,
+            y,
+            ACTIONS_WIDTH,
+            ACTIONS_HEIGHT,
+            None,
+            None,
+            Some(hinstance),
+            Some(raw_state as *const c_void),
+        ) {
+            Ok(actions) => actions,
+            Err(_) => {
+                drop(Box::from_raw(raw_state));
+                return HWND(null_mut());
+            }
+        };
+        let _ = ShowWindow(actions, SW_SHOWNOACTIVATE);
+        actions
+    }
+}
+
+unsafe fn reposition_actions(pin: HWND) {
+    unsafe {
+        let Some(state) = state(pin) else {
+            return;
+        };
+        if !IsWindow(Some(state.actions)).as_bool() {
+            return;
+        }
+        let mut pin_rect = RECT::default();
+        if GetWindowRect(pin, &mut pin_rect).is_err() {
+            return;
+        }
+        let (x, y) = actions_position(&pin_rect);
+        let _ = SetWindowPos(
+            state.actions,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+unsafe extern "system" fn actions_wndproc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        match message {
+            WM_NCCREATE => {
+                let create = lparam.0 as *const CREATESTRUCTW;
+                if !create.is_null() {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*create).lpCreateParams as isize);
+                }
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+            WM_ERASEBKGND => LRESULT(1),
+            WM_PAINT => {
+                let mut paint = PAINTSTRUCT::default();
+                let hdc = BeginPaint(hwnd, &mut paint);
+                let background = CreateSolidBrush(COLORREF(0x0020_2020));
+                let rect = RECT {
+                    left: 0,
+                    top: 0,
+                    right: ACTIONS_WIDTH,
+                    bottom: ACTIONS_HEIGHT,
+                };
+                FillRect(hdc, &rect, background);
+                let _ = DeleteObject(HGDIOBJ(background.0));
+
+                let labels = ["复制", "保存", "关闭"];
+                let cell_width = ACTIONS_WIDTH / 3;
+                SetBkMode(hdc, TRANSPARENT);
+                let old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
+                for (index, label) in labels.iter().enumerate() {
+                    let left = cell_width * index as i32;
+                    let mut cell = RECT {
+                        left,
+                        top: 0,
+                        right: left + cell_width,
+                        bottom: ACTIONS_HEIGHT,
+                    };
+                    SetTextColor(hdc, COLORREF(0x00E0_E0E0));
+                    let mut wide_label = wide(label);
+                    DrawTextW(
+                        hdc,
+                        &mut wide_label,
+                        &mut cell,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                    );
+                }
+                SelectObject(hdc, old_font);
+                let _ = EndPaint(hwnd, &paint);
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                let Some(actions) = actions_state(hwnd) else {
+                    return LRESULT(0);
+                };
+                let _ = SetForegroundWindow(actions.pin);
+                let _ = SetFocus(Some(actions.pin));
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                if x >= 0 {
+                    match (x / (ACTIONS_WIDTH / 3)).clamp(0, 2) {
+                        0 => pin_copy(actions.pin),
+                        1 => pin_save(actions.pin),
+                        2 => {
+                            let _ = DestroyWindow(actions.pin);
+                        }
+                        _ => {}
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ActionsState;
+                if !pointer.is_null() {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                    drop(Box::from_raw(pointer));
+                }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, message, wparam, lparam),
+        }
+    }
+}
+
+unsafe fn actions_state(hwnd: HWND) -> Option<&'static mut ActionsState> {
+    unsafe {
+        let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ActionsState;
+        if pointer.is_null() {
+            None
+        } else {
+            Some(&mut *pointer)
+        }
     }
 }
 
@@ -658,7 +908,10 @@ unsafe extern "system" fn hint_wndproc(
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, COLORREF(0x00FF_FFFF));
                 let old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
-                let mut text = wide(HINT_TEXT);
+                let mut buffer = [0u16; 256];
+                let length = GetWindowTextW(hwnd, &mut buffer);
+                let text = String::from_utf16_lossy(&buffer[..length.max(0) as usize]);
+                let mut text = wide(&text);
                 DrawTextW(
                     hdc,
                     &mut text,
