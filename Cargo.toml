@@ -1,6 +1,6 @@
 [package]
 name = "window-cap"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 description = "Windows screenshot and annotation tool (flameshot-like)"
 license = "MIT"

@@ -157,7 +157,7 @@ pub fn run_once(config_path: Option<PathBuf>, delay_ms: u64) -> Result<()> {
         std::thread::sleep(Duration::from_millis(delay_ms));
     }
 
-    match capture_flow(None, &config)? {
+    match capture_flow(None, &config, false)? {
         Some(outcome) => {
             config.capture.set_last_rect(outcome.rect);
             if let Err(error) = config.save(&path) {
@@ -201,6 +201,7 @@ pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
             OverlayOptions {
                 scripted: Some(rect),
                 script_delay_ms: 40,
+                allow_pin: false,
             },
         )?;
     }
@@ -217,6 +218,7 @@ pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
             OverlayOptions {
                 scripted: Some(rect),
                 script_delay_ms: 40,
+                allow_pin: false,
             },
         )? {
             OverlayResult::Confirmed {
@@ -273,10 +275,17 @@ struct CaptureOutcome {
     rect: RectI,
     path: Option<PathBuf>,
     copied: bool,
+    pinned: bool,
 }
 
 impl CaptureOutcome {
     fn message(&self) -> String {
+        if self.pinned {
+            return format!(
+                "已贴图 {}×{}（拖动移动，Ctrl+滚轮缩放，Esc/双击关闭）",
+                self.width, self.height
+            );
+        }
         match (&self.path, self.copied) {
             (Some(path), true) => format!(
                 "已复制 {}×{} 并保存到 {}",
@@ -299,7 +308,11 @@ impl CaptureOutcome {
     }
 }
 
-fn capture_flow(scripted: Option<RectI>, config: &Config) -> Result<Option<CaptureOutcome>> {
+fn capture_flow(
+    scripted: Option<RectI>,
+    config: &Config,
+    allow_pin: bool,
+) -> Result<Option<CaptureOutcome>> {
     let screen = VirtualScreen::current();
     if screen.width <= 0 || screen.height <= 0 {
         return Err(AppError::msg("虚拟桌面尺寸无效"));
@@ -316,6 +329,7 @@ fn capture_flow(scripted: Option<RectI>, config: &Config) -> Result<Option<Captu
         OverlayOptions {
             scripted,
             script_delay_ms: 80,
+            allow_pin,
         },
     )?;
 
@@ -338,6 +352,22 @@ fn capture_flow(scripted: Option<RectI>, config: &Config) -> Result<Option<Captu
                 rect,
                 path,
                 copied,
+                pinned: false,
+            }))
+        }
+        OverlayResult::Pinned { image } => {
+            let width = image.width;
+            let height = image.height;
+            let origin = image.origin;
+            ui::pin::show(image)?;
+            ::log::info!("pinned capture {width}x{height}");
+            Ok(Some(CaptureOutcome {
+                width,
+                height,
+                rect: RectI::new(origin.0, origin.1, width as i32, height as i32),
+                path: None,
+                copied: false,
+                pinned: true,
             }))
         }
         OverlayResult::Cancelled => {
@@ -402,6 +432,7 @@ fn capture_region(rect: RectI, config: &Config) -> Result<CaptureOutcome> {
         rect,
         path,
         copied,
+        pinned: false,
     })
 }
 
@@ -482,7 +513,7 @@ impl App {
     }
 
     fn do_capture(&mut self) {
-        match capture_flow(None, &self.config) {
+        match capture_flow(None, &self.config, true) {
             Ok(Some(outcome)) => {
                 self.remember_region(outcome.rect);
                 self.notify(&outcome.message(), false);

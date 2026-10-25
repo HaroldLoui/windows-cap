@@ -66,11 +66,14 @@ pub struct OverlayOptions {
     /// 脚本化测试用：直接给出一个选区，延时后自动确认。
     pub scripted: Option<RectI>,
     pub script_delay_ms: u32,
+    /// 是否允许“贴图”动作（常驻模式为 true）。
+    pub allow_pin: bool,
 }
 
 /// 遮罩结果。
 pub enum OverlayResult {
     Confirmed { image: Frame, rect: RectI },
+    Pinned { image: Frame },
     Cancelled,
 }
 
@@ -114,6 +117,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
         let mut overlay = Box::new(Overlay {
             hwnd: HWND(null_mut()),
             area,
+            allow_pin: options.allow_pin,
             frame,
             dim,
             composed,
@@ -269,6 +273,7 @@ enum TextDrag {
 struct Overlay {
     hwnd: HWND,
     area: VirtualScreen,
+    allow_pin: bool,
     frame: Frame,
     dim: Dib,
     composed: Dib,
@@ -397,10 +402,26 @@ impl Overlay {
                     .as_ref()
                     .map(|document| document.can_redo())
                     .unwrap_or(false),
+                can_pin: self.allow_pin,
             };
             Toolbar::layout(rect, self.area, self.ui_scale, &state)
         });
         self.toolbar_hover = None;
+    }
+
+    fn export_image(&self) -> Option<Frame> {
+        let selection = self.selection.rect();
+        let rect = selection.unwrap_or_else(|| self.area_rect());
+        match (&self.document, selection) {
+            (Some(document), Some(_)) => Some(document.export_frame((rect.x, rect.y))),
+            _ => match self.frame.crop(rect) {
+                Ok(image) => Some(image),
+                Err(error) => {
+                    ::log::error!("导出失败: {error}");
+                    None
+                }
+            },
+        }
     }
 
     fn confirm(&mut self) {
@@ -415,18 +436,23 @@ impl Overlay {
             "confirm rect={rect:?} has_document={}",
             self.document.is_some()
         );
-        let image = match (&self.document, selection) {
-            (Some(document), Some(_)) => document.export_frame((rect.x, rect.y)),
-            _ => match self.frame.crop(rect) {
-                Ok(image) => image,
-                Err(error) => {
-                    ::log::error!("导出失败: {error}");
-                    self.cancel();
-                    return;
-                }
-            },
+        let Some(image) = self.export_image() else {
+            self.cancel();
+            return;
         };
         self.finish(OverlayResult::Confirmed { image, rect });
+    }
+
+    fn pin_image(&mut self) {
+        if self.result.is_some() {
+            return;
+        }
+        self.close_text_editor();
+        let Some(image) = self.export_image() else {
+            self.cancel();
+            return;
+        };
+        self.finish(OverlayResult::Pinned { image });
     }
 
     fn cancel(&mut self) {
@@ -1007,6 +1033,10 @@ impl Overlay {
                 self.confirm();
                 return;
             }
+            ToolbarAction::Pin => {
+                self.pin_image();
+                return;
+            }
             ToolbarAction::Cancel => {
                 self.cancel();
                 return;
@@ -1490,6 +1520,7 @@ fn tooltip_text(action: ToolbarAction) -> String {
         ToolbarAction::Undo => "撤销 (Ctrl+Z)".to_string(),
         ToolbarAction::Redo => "重做 (Ctrl+Y)".to_string(),
         ToolbarAction::Copy => "复制 (Ctrl+C)".to_string(),
+        ToolbarAction::Pin => "贴图".to_string(),
         ToolbarAction::Save => "保存 (Ctrl+S)".to_string(),
         ToolbarAction::Cancel => "关闭 (Esc)".to_string(),
         ToolbarAction::Noop => String::new(),

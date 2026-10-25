@@ -97,6 +97,7 @@ pub enum ToolbarAction {
     Undo,
     Redo,
     Copy,
+    Pin,
     Save,
     Cancel,
     Noop,
@@ -120,6 +121,7 @@ pub struct ToolbarState {
     pub width: f32,
     pub can_undo: bool,
     pub can_redo: bool,
+    pub can_pin: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -128,6 +130,7 @@ enum Icon {
     Undo,
     Redo,
     Copy,
+    Pin,
     Save,
     Close,
     Minus,
@@ -164,7 +167,17 @@ impl Toolbar {
         let separator_margin = (6.0 * scale).round() as i32;
 
         let tools_width = 10 * cell + 9 * gap;
-        let actions_width = 5 * cell + 4 * gap;
+        let mut pin_actions: Vec<(Icon, ToolbarAction, bool)> = vec![
+            (Icon::Undo, ToolbarAction::Undo, state.can_undo),
+            (Icon::Redo, ToolbarAction::Redo, state.can_redo),
+            (Icon::Copy, ToolbarAction::Copy, true),
+        ];
+        if state.can_pin {
+            pin_actions.push((Icon::Pin, ToolbarAction::Pin, true));
+        }
+        pin_actions.push((Icon::Save, ToolbarAction::Save, true));
+        pin_actions.push((Icon::Close, ToolbarAction::Cancel, true));
+        let actions_width = pin_actions.len() as i32 * cell + (pin_actions.len() as i32 - 1) * gap;
         let colors_width = 8 * cell + 7 * gap;
         let width_controls = cell + gap + (40.0 * scale) as i32 + gap + cell;
         let divider_width = separator_margin * 2 + 1;
@@ -209,13 +222,7 @@ impl Toolbar {
         x += separator_margin;
         let row1_divider = x;
         x += separator_margin + 1;
-        for (icon, action, enabled) in [
-            (Icon::Undo, ToolbarAction::Undo, state.can_undo),
-            (Icon::Redo, ToolbarAction::Redo, state.can_redo),
-            (Icon::Copy, ToolbarAction::Copy, true),
-            (Icon::Save, ToolbarAction::Save, true),
-            (Icon::Close, ToolbarAction::Cancel, true),
-        ] {
+        for (icon, action, enabled) in pin_actions {
             buttons.push(Button {
                 rect: RectI::new(x, row1_y, cell, cell),
                 action,
@@ -954,6 +961,44 @@ unsafe fn draw_icon(graphics: *mut GpGraphics, icon: Icon, x: f32, y: f32, s: f3
                     u(1.4),
                 );
             }
+            Icon::Pin => {
+                stroke_ellipse(
+                    graphics,
+                    x + u(6.5),
+                    y + u(2.0),
+                    u(5.0),
+                    u(5.0),
+                    color,
+                    u(1.3),
+                );
+                stroke_line(
+                    graphics,
+                    x + u(9.0),
+                    y + u(6.2),
+                    x + u(9.0),
+                    y + u(11.0),
+                    color,
+                    u(1.6),
+                );
+                stroke_line(
+                    graphics,
+                    x + u(4.5),
+                    y + u(11.0),
+                    x + u(13.5),
+                    y + u(11.0),
+                    color,
+                    u(1.6),
+                );
+                stroke_line(
+                    graphics,
+                    x + u(9.0),
+                    y + u(11.0),
+                    x + u(9.0),
+                    y + u(16.0),
+                    color,
+                    u(1.6),
+                );
+            }
             Icon::Save => {
                 stroke_line(
                     graphics,
@@ -1046,6 +1091,7 @@ mod tests {
             width: 4.0,
             can_undo: false,
             can_redo: false,
+            can_pin: true,
         }
     }
 
@@ -1106,6 +1152,7 @@ mod tests {
             ToolbarAction::Undo,
             ToolbarAction::Redo,
             ToolbarAction::Copy,
+            ToolbarAction::Pin,
             ToolbarAction::Save,
             ToolbarAction::Cancel,
             ToolbarAction::Width(-1),
