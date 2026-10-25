@@ -1,7 +1,5 @@
 //! 剪贴板输出：把 `Frame` 写成 Windows 标准的 `CF_DIB`。
 
-use std::ptr;
-
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
@@ -38,7 +36,8 @@ pub fn put(frame: &Frame) -> Result<()> {
                             let _ = GlobalFree(Some(hglobal));
                             return Err(AppError::msg("GlobalLock 失败"));
                         }
-                        ptr::copy_nonoverlapping(dib.as_ptr(), pointer as *mut u8, dib.len());
+                        // 写入剪贴板
+                        std::ptr::copy_nonoverlapping(dib.as_ptr(), pointer as *mut u8, dib.len());
                         let _ = GlobalUnlock(hglobal);
 
                         // 设置成功后所有权归系统；失败路径自行 GlobalFree。
