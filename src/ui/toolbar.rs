@@ -758,7 +758,19 @@ pub fn paint_pin_actions(hdc: HDC, hover: Option<usize>) {
                 fill_rounded(graphics, left, top, 30.0 * s, 30.0 * s, 7.0 * s, background);
             }
             let color = if index == 2 { CLOSE_COLOR } else { ICON_COLOR };
-            draw_icon(graphics, *icon, left, top, s, color);
+            let (offset_x, offset_y) = match index {
+                0 => (5.0, 7.0),
+                1 => (6.0, 6.5),
+                _ => (6.0, 6.0),
+            };
+            draw_icon(
+                graphics,
+                *icon,
+                left + offset_x * s,
+                top + offset_y * s,
+                s,
+                color,
+            );
         }
         let _ = GdipFlush(graphics, FlushIntentionSync);
         let _ = GdipDeleteGraphics(graphics);
