@@ -1,9 +1,10 @@
 [package]
 name = "window-cap"
-version = "0.10.0-beta.3"
+version = "0.10.0-beta.4"
 edition = "2024"
 description = "Windows screenshot and annotation tool (flameshot-like)"
 license = "MIT"
+repository = "https://github.com/HaroldLoui/windows-cap"
 build = "build.rs"
 
 [dependencies]

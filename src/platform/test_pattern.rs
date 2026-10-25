@@ -1,7 +1,4 @@
-//! 静态测试图案窗口：用于验证坐标映射与采集一致性。
-//!
-//! 窗口内容为四个纯色色块（红/绿/蓝/白），不随桌面动画变化，
-//! 因此可以在自动化测试里把"区域截图"和"整屏裁剪"做逐像素比较。
+//! 静态四色块测试窗口：验证坐标映射与采集一致性。
 
 use std::time::Duration;
 
@@ -24,11 +21,13 @@ const CLASS_NAME: windows::core::PCWSTR = windows::core::w!("window_cap_test_pat
 const PATTERN_WIDTH: i32 = 400;
 const PATTERN_HEIGHT: i32 = 300;
 
+/// 静态测试窗口，Drop 时自动销毁。
 pub struct TestPattern {
     hwnd: HWND,
 }
 
 impl TestPattern {
+    /// 在虚拟桌面中央显示 400x300 的四色块窗口。
     pub fn show() -> Result<Self> {
         let screen = VirtualScreen::current();
         if screen.width < PATTERN_WIDTH || screen.height < PATTERN_HEIGHT {
@@ -74,6 +73,7 @@ impl TestPattern {
         }
     }
 
+    /// 返回窗口的屏幕矩形。
     pub fn rect(&self) -> RectI {
         let mut rect = RECT::default();
         unsafe {
@@ -87,6 +87,7 @@ impl TestPattern {
         )
     }
 
+    /// 关闭并销毁窗口。
     pub fn close(self) {
         drop(self);
     }
@@ -102,6 +103,7 @@ impl Drop for TestPattern {
     }
 }
 
+/// 窗口过程：擦除背景并按象限绘制四色块。
 unsafe extern "system" fn pattern_wndproc(
     hwnd: HWND,
     message: u32,
@@ -115,11 +117,13 @@ unsafe extern "system" fn pattern_wndproc(
                 let mut paint = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut paint);
 
+                // 步骤 1：把客户区均分为四个象限。
                 let mut client = RECT::default();
                 let _ = GetClientRect(hwnd, &mut client);
                 let half_width = (client.right - client.left) / 2;
                 let half_height = (client.bottom - client.top) / 2;
 
+                // 步骤 2：按象限填充红、绿、蓝、白。
                 fill(
                     hdc,
                     RECT {
@@ -169,6 +173,7 @@ unsafe extern "system" fn pattern_wndproc(
     }
 }
 
+/// 用纯色画刷填充矩形，并释放画刷。
 unsafe fn fill(hdc: HDC, rect: RECT, color: u32) {
     unsafe {
         let brush: HBRUSH = CreateSolidBrush(COLORREF(color));

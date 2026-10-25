@@ -14,6 +14,7 @@ use crate::util::error::{AppError, Result};
 pub const DEFAULT_CAPTURE_HOTKEY: &str = "Ctrl+Alt+A";
 pub const DEFAULT_QUIT_HOTKEY: &str = "Ctrl+Alt+Q";
 
+/// 完整应用配置。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
@@ -23,6 +24,7 @@ pub struct Config {
     pub ui: UiConfig,
 }
 
+/// 全局热键配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotkeyConfig {
@@ -30,6 +32,7 @@ pub struct HotkeyConfig {
     pub quit: String,
 }
 
+/// 截图行为配置。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct CaptureConfig {
@@ -40,17 +43,20 @@ pub struct CaptureConfig {
 }
 
 impl CaptureConfig {
+    /// 上次选区；无效时返回 None。
     pub fn last_rect(&self) -> Option<RectI> {
         let [x, y, width, height] = self.last_region?;
         let rect = RectI::new(x, y, width, height);
         if rect.is_empty() { None } else { Some(rect) }
     }
 
+    /// 记录上次选区。
     pub fn set_last_rect(&mut self, rect: RectI) {
         self.last_region = Some([rect.x, rect.y, rect.width, rect.height]);
     }
 }
 
+/// 输出行为配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OutputConfig {
@@ -61,6 +67,7 @@ pub struct OutputConfig {
     pub format: String,
 }
 
+/// 界面配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -108,7 +115,7 @@ impl Config {
             .join("config.toml")
     }
 
-    /// 读取配置；文件不存在时创建默认文件，解析失败时备份并回退默认。
+    /// 读取配置；缺失时创建默认，损坏时回退默认值。
     pub fn load_or_create(path: &Path) -> (Self, Option<String>) {
         match fs::read_to_string(path) {
             Ok(text) => match toml::from_str::<Config>(&text) {
@@ -141,6 +148,7 @@ impl Config {
         }
     }
 
+    /// 写入配置文件。
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path
             .parent()
@@ -156,6 +164,7 @@ impl Config {
         Ok(())
     }
 
+    /// 校验并归一化配置。
     pub fn sanitize(mut self) -> Self {
         if !self.output.format.eq_ignore_ascii_case("png") {
             self.output.format = "png".to_string();
@@ -229,6 +238,7 @@ impl Hotkey {
         })
     }
 
+    /// 规范化后的显示文本。
     pub fn label(&self) -> String {
         let mut parts = Vec::new();
         if self.modifiers.0 & MOD_CONTROL.0 != 0 {

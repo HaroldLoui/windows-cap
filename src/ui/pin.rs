@@ -1,4 +1,4 @@
-//! 贴图窗口：置顶、带阴影的悬浮卡片；可拖动、Ctrl+滚轮缩放、复制/保存/关闭。
+//! 贴图窗口：置顶悬浮卡片，支持拖动、缩放、复制、保存与关闭。
 
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -51,17 +51,20 @@ const ZOOM_HIDE_MS: u32 = 900;
 const WM_MOUSELEAVE_EVENT: u32 = 0x02A3;
 const HINT_TEXT: &str = "已贴图 · 拖动移动 · Ctrl+滚轮缩放 · Esc/双击关闭";
 
+/// 提示条相对贴图的出现位置。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HintPlacement {
     Right,
     Above,
 }
 
+/// 拖动起点：鼠标屏幕坐标与窗口屏幕坐标。
 struct DragState {
     cursor: (i32, i32),
     window: (i32, i32),
 }
 
+/// 贴图主窗口的运行时状态。
 struct PinState {
     image: Frame,
     drag: Option<DragState>,
@@ -70,12 +73,13 @@ struct PinState {
     actions: HWND,
 }
 
+/// 贴图操作条的运行时状态。
 struct ActionsState {
     pin: HWND,
     hover: i32,
 }
 
-/// 创建一个贴图窗口（不阻塞，常驻消息循环继续处理）。
+/// 创建贴图窗口，不阻塞调用线程。
 pub fn show(image: Frame) -> Result<()> {
     unsafe {
         let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
@@ -150,6 +154,7 @@ pub fn show(image: Frame) -> Result<()> {
     }
 }
 
+/// 注册窗口类。
 unsafe fn register_class(
     hinstance: HINSTANCE,
     name: PCWSTR,
@@ -164,10 +169,12 @@ unsafe fn register_class(
     }
 }
 
+/// 转为以 NUL 结尾的 UTF-16 字符串。
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// 取得贴图窗口的可变状态。
 unsafe fn state(hwnd: HWND) -> Option<&'static mut PinState> {
     unsafe {
         let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PinState;
@@ -193,6 +200,8 @@ unsafe fn update_layer(hwnd: HWND) {
         let height = rect.bottom.max(1);
         let content_width = (width - SHADOW * 2).max(1);
         let content_height = (height - SHADOW * 2).max(1);
+
+        // 步骤 1：按窗口尺寸生成像素缓冲，内容区缩放，边缘绘制阴影。
         let mut buffer = vec![0u8; (width * height * 4) as usize];
 
         for y in 0..height {
@@ -222,6 +231,7 @@ unsafe fn update_layer(hwnd: HWND) {
             }
         }
 
+        // 步骤 2：创建自上而下的 32 位 DIB 并拷贝像素。
         let mut info = BITMAPINFO::default();
         info.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
         info.bmiHeader.biWidth = width;
@@ -242,6 +252,7 @@ unsafe fn update_layer(hwnd: HWND) {
         }
         let old = SelectObject(memory_dc, HGDIOBJ(bitmap.0));
 
+        // 步骤 3：按预乘 alpha 提交分层窗口。
         let screen = GetDC(None);
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
@@ -264,6 +275,7 @@ unsafe fn update_layer(hwnd: HWND) {
             Some(&blend),
             ULW_ALPHA,
         );
+        // 步骤 4：恢复并释放 GDI 资源。
         let _ = ReleaseDC(None, screen);
         SelectObject(memory_dc, old);
         let _ = DeleteObject(HGDIOBJ(bitmap.0));
@@ -271,6 +283,7 @@ unsafe fn update_layer(hwnd: HWND) {
     }
 }
 
+/// 在光标处弹出右键菜单并执行所选命令。
 unsafe fn show_menu(hwnd: HWND) {
     unsafe {
         let Some(pin) = state(hwnd) else {
@@ -287,6 +300,7 @@ unsafe fn show_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, 3, PCWSTR(close.as_ptr()));
 
+        // 弹出前先置前台，关闭后补发 WM_NULL，确保菜单及时关闭。
         let mut point = POINT::default();
         let _ = GetCursorPos(&mut point);
         let _ = SetForegroundWindow(hwnd);
@@ -320,6 +334,7 @@ unsafe fn show_menu(hwnd: HWND) {
     }
 }
 
+/// 贴图窗口的消息处理：拖动、缩放、快捷键与销毁清理。
 unsafe extern "system" fn pin_wndproc(
     hwnd: HWND,
     message: u32,
@@ -328,6 +343,7 @@ unsafe extern "system" fn pin_wndproc(
 ) -> LRESULT {
     unsafe {
         match message {
+            // 步骤 1：创建时保存状态；绘制完全由分层窗口负责。
             WM_NCCREATE => {
                 let create = lparam.0 as *const CREATESTRUCTW;
                 if !create.is_null() {
@@ -342,6 +358,7 @@ unsafe extern "system" fn pin_wndproc(
                 let _ = EndPaint(hwnd, &paint);
                 LRESULT(0)
             }
+            // 步骤 2：左键拖动窗口，并同步移动操作条。
             WM_LBUTTONDOWN => {
                 if let Some(pin) = state(hwnd) {
                     let mut cursor = POINT::default();
@@ -391,6 +408,7 @@ unsafe extern "system" fn pin_wndproc(
                 let _ = DestroyWindow(hwnd);
                 LRESULT(0)
             }
+            // 步骤 3：Ctrl+滚轮以光标为锚点缩放。
             WM_MOUSEWHEEL => {
                 let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
                 if ctrl && let Some(pin) = state(hwnd) {
@@ -431,6 +449,7 @@ unsafe extern "system" fn pin_wndproc(
                 }
                 LRESULT(0)
             }
+            // 步骤 4：Esc 关闭，Enter/Ctrl+S 保存，Ctrl+C 复制。
             WM_KEYDOWN => {
                 let key = wparam.0 as u16;
                 let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
@@ -443,11 +462,13 @@ unsafe extern "system" fn pin_wndproc(
                 }
                 LRESULT(0)
             }
+            // 步骤 5：处理右键菜单与销毁清理。
             WM_RBUTTONUP => {
                 show_menu(hwnd);
                 LRESULT(0)
             }
             WM_DESTROY => {
+                // 先清除 USERDATA，避免子窗口销毁时回访主状态。
                 let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PinState;
                 if !pointer.is_null() {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -470,7 +491,7 @@ unsafe extern "system" fn pin_wndproc(
     }
 }
 
-/// 在贴图上方显示缩放百分比，短暂无操作后自动消失。
+/// 在贴图上方显示缩放百分比并定时隐藏。
 unsafe fn show_zoom(pin: HWND, percent: i32) {
     unsafe {
         let Some(pin_state) = state(pin) else {
@@ -541,6 +562,7 @@ unsafe fn show_zoom(pin: HWND, percent: i32) {
     }
 }
 
+/// 缩放提示窗口的消息处理。
 unsafe extern "system" fn zoom_wndproc(
     hwnd: HWND,
     message: u32,
@@ -594,6 +616,7 @@ unsafe extern "system" fn zoom_wndproc(
     }
 }
 
+/// 复制贴图到剪贴板并提示结果。
 unsafe fn pin_copy(pin: HWND) {
     unsafe {
         if let Some(state) = state(pin) {
@@ -603,6 +626,7 @@ unsafe fn pin_copy(pin: HWND) {
     }
 }
 
+/// 保存 PNG 并提示结果。
 unsafe fn pin_save(pin: HWND) {
     unsafe {
         let mut saved = false;
@@ -624,6 +648,7 @@ unsafe fn pin_save(pin: HWND) {
     }
 }
 
+/// 在贴图上方短暂显示提示。
 unsafe fn show_toast(pin: HWND, text: &str) {
     unsafe {
         if let Some(state) = state(pin)
@@ -639,7 +664,7 @@ unsafe fn show_toast(pin: HWND, text: &str) {
     }
 }
 
-/// 创建提示条（可放在贴图右侧或上方），到时自动消失。
+/// 创建提示条并定时关闭。
 unsafe fn show_hint(pin: HWND, placement: HintPlacement, text: &str, duration: u32) -> HWND {
     unsafe {
         let Ok(hinstance) = GetModuleHandleW(None).map(|module| HINSTANCE(module.0)) else {
@@ -719,6 +744,7 @@ unsafe fn show_hint(pin: HWND, placement: HintPlacement, text: &str, duration: u
     }
 }
 
+/// 返回操作条中命中的按钮序号。
 fn action_hit(x: i32, y: i32) -> Option<usize> {
     if !(6..36).contains(&y) {
         return None;
@@ -732,6 +758,7 @@ fn action_hit(x: i32, y: i32) -> Option<usize> {
     None
 }
 
+/// 计算操作条相对贴图的屏幕位置。
 fn actions_position(pin_rect: &RECT) -> (i32, i32) {
     let content_top = pin_rect.top + SHADOW;
     let content_bottom = pin_rect.bottom - SHADOW;
@@ -744,6 +771,7 @@ fn actions_position(pin_rect: &RECT) -> (i32, i32) {
     (x, y)
 }
 
+/// 创建贴图操作条窗口。
 unsafe fn create_actions(pin: HWND) -> HWND {
     unsafe {
         let Ok(hinstance) = GetModuleHandleW(None).map(|module| HINSTANCE(module.0)) else {
@@ -784,6 +812,7 @@ unsafe fn create_actions(pin: HWND) -> HWND {
     }
 }
 
+/// 跟随贴图重新定位操作条。
 unsafe fn reposition_actions(pin: HWND) {
     unsafe {
         let Some(state) = state(pin) else {
@@ -809,6 +838,7 @@ unsafe fn reposition_actions(pin: HWND) {
     }
 }
 
+/// 操作条窗口的消息处理。
 unsafe extern "system" fn actions_wndproc(
     hwnd: HWND,
     message: u32,
@@ -894,6 +924,7 @@ unsafe extern "system" fn actions_wndproc(
     }
 }
 
+/// 取得操作条窗口的可变状态。
 unsafe fn actions_state(hwnd: HWND) -> Option<&'static mut ActionsState> {
     unsafe {
         let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ActionsState;
@@ -905,6 +936,7 @@ unsafe fn actions_state(hwnd: HWND) -> Option<&'static mut ActionsState> {
     }
 }
 
+/// 提示条窗口的消息处理。
 unsafe extern "system" fn hint_wndproc(
     hwnd: HWND,
     message: u32,

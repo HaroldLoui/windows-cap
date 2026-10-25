@@ -21,6 +21,7 @@ use crate::util::error::{AppError, Result};
 pub const WM_TRAY: u32 = WM_APP + 10;
 const TRAY_ID: u32 = 1;
 
+/// 托盘菜单动作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayCommand {
     Capture,
@@ -59,6 +60,7 @@ impl TrayCommand {
     }
 }
 
+/// 托盘图标及其菜单。
 pub struct Tray {
     hwnd: HWND,
     icon: HICON,
@@ -66,6 +68,7 @@ pub struct Tray {
 }
 
 impl Tray {
+    /// 添加托盘图标。
     pub fn add(hwnd: HWND, tooltip: &str) -> Result<Self> {
         let icon = load_icon()?;
         let mut data = base_data(hwnd, icon);
@@ -106,6 +109,7 @@ impl Tray {
         })
     }
 
+    /// 更新悬停提示。
     pub fn set_tooltip(&self, tooltip: &str) {
         let mut data = base_data(self.hwnd, self.icon);
         data.uFlags = NIF_TIP;
@@ -115,6 +119,7 @@ impl Tray {
         }
     }
 
+    /// 显示气泡通知。
     pub fn notify(&self, message: &str, is_error: bool) {
         let mut data = base_data(self.hwnd, self.icon);
         data.uFlags = NIF_INFO;
@@ -126,12 +131,14 @@ impl Tray {
         }
     }
 
+    /// 弹出右键菜单并返回用户选择。
     pub fn show_menu(
         &self,
         autostart: bool,
         capture_label: &str,
         last_region: Option<crate::capture::RectI>,
     ) -> Option<TrayCommand> {
+        // 步骤 1：构建菜单项。
         let menu = unsafe { CreatePopupMenu().ok()? };
         let capture_text = format!("截图    {capture_label}");
         let last_text = match last_region {
@@ -174,6 +181,7 @@ impl Tray {
             append(menu, MF_SEPARATOR, 0, "");
             append(menu, MF_STRING, TrayCommand::Quit.id(), "退出");
 
+            // 步骤 2：置前并弹出菜单。
             let mut point = POINT::default();
             let _ = GetCursorPos(&mut point);
             let _ = SetForegroundWindow(self.hwnd);
@@ -186,6 +194,7 @@ impl Tray {
                 self.hwnd,
                 None,
             );
+            // 步骤 3：销毁菜单并补发 WM_NULL，避免菜单残留。
             let _ = DestroyMenu(menu);
             let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
 

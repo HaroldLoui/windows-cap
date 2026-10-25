@@ -1,5 +1,8 @@
+//! 应用统一错误类型与结果别名。
+
 use thiserror::Error;
 
+/// 应用统一错误。
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("Win32 调用失败: {0}")]
@@ -16,9 +19,11 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// 构造消息错误。
     pub fn msg(message: impl Into<String>) -> Self {
         Self::Message(message.into())
     }
 }
 
+/// 应用结果类型。
 pub type Result<T> = std::result::Result<T, AppError>;

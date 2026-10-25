@@ -1,3 +1,5 @@
+//! 32bpp 自顶向下 DIB 与内存 DC 的 RAII 封装。
+
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::null_mut;
@@ -21,11 +23,13 @@ pub struct Dib {
 }
 
 impl Dib {
+    /// 创建指定尺寸的 32bpp 自顶向下 DIB 和内存 DC。
     pub fn new(width: u32, height: u32) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(AppError::msg("DIB 尺寸不能为 0"));
         }
 
+        // SAFETY: 成功时资源由 Drop 释放，失败分支手动清理。
         unsafe {
             let dc = CreateCompatibleDC(None);
             if dc.0.is_null() {
@@ -84,10 +88,12 @@ impl Dib {
         Ok(dib)
     }
 
+    /// 只读像素数据（BGRA，自顶向下）。
     pub fn pixels(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.bits, self.len) }
     }
 
+    /// 可变像素数据，供后续编辑功能直接改写。
     #[allow(dead_code)] // P3 的马赛克/撤销会直接改像素
     pub fn pixels_mut(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.bits, self.len) }

@@ -1,7 +1,4 @@
-//! 标注模型与成品表面。
-//!
-//! 坐标一律是 **document 本地像素**（相对选区左上角）；预览与导出共用同一块
-//! `Document::surface`，因此不存在两套渲染结果。
+//! 标注模型与共享成品表面，坐标使用 document 本地像素。
 
 pub mod render;
 
@@ -9,8 +6,10 @@ use crate::capture::{Frame, RectI};
 use crate::platform::dib::Dib;
 use crate::util::error::{AppError, Result};
 
+/// 文档本地坐标点。
 pub type Point = (i32, i32);
 
+/// 描边颜色与线宽。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stroke {
     /// GDI+ ARGB（`0xAARRGGBB`）。
@@ -19,11 +18,13 @@ pub struct Stroke {
 }
 
 impl Stroke {
+    /// 创建描边。
     pub fn new(color: u32, width: f32) -> Self {
         Self { color, width }
     }
 }
 
+/// 标注形状。
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShapeKind {
     Line {
@@ -66,6 +67,7 @@ pub enum ShapeKind {
     },
 }
 
+/// 带描边的标注形状。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shape {
     pub kind: ShapeKind,
@@ -73,6 +75,7 @@ pub struct Shape {
 }
 
 impl Shape {
+    /// 创建标注形状。
     pub fn new(kind: ShapeKind, color: u32, width: f32) -> Self {
         Self {
             kind,
@@ -80,6 +83,7 @@ impl Shape {
         }
     }
 
+    /// 是否为序号形状。
     pub fn is_step(&self) -> bool {
         matches!(self.kind, ShapeKind::Step { .. })
     }
@@ -103,11 +107,13 @@ impl Document {
         Self::from_base_at(crop.width, crop.height, crop.bgra, (rect.x, rect.y))
     }
 
-    #[allow(dead_code)] // 测试用构造
+    /// 从无标注底图建立文档（测试用）。
+    #[allow(dead_code)]
     pub fn from_base(width: u32, height: u32, base: Vec<u8>) -> Result<Self> {
         Self::from_base_at(width, height, base, (0, 0))
     }
 
+    /// 建立指定原点与底图尺寸的文档。
     pub fn from_base_at(
         width: u32,
         height: u32,
@@ -130,39 +136,47 @@ impl Document {
         })
     }
 
+    /// 返回文档在屏幕上的原点。
     pub fn origin(&self) -> (i32, i32) {
         self.origin
     }
 
+    /// 返回文档宽度。
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// 返回文档高度。
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    /// 返回共享成品表面。
     pub fn surface(&self) -> &Dib {
         &self.surface
     }
 
+    /// 是否已有标注。
     pub fn has_shapes(&self) -> bool {
         !self.shapes.is_empty()
     }
 
+    /// 是否可以撤销。
     pub fn can_undo(&self) -> bool {
         !self.shapes.is_empty()
     }
 
+    /// 是否可以重做。
     pub fn can_redo(&self) -> bool {
         !self.undone.is_empty()
     }
 
+    /// 返回下一个序号标注的编号。
     pub fn next_step_index(&self) -> u32 {
         self.shapes.iter().filter(|shape| shape.is_step()).count() as u32 + 1
     }
 
-    /// 提交一个标注：增量绘制到 surface。
+    /// 提交标注并增量绘制到共享表面。
     pub fn add(&mut self, shape: Shape) -> Result<()> {
         render::draw_shape(&mut self.surface, &shape, (0, 0))?;
         self.shapes.push(shape);
@@ -170,6 +184,7 @@ impl Document {
         Ok(())
     }
 
+    /// 撤销最后一个标注并重建表面。
     pub fn undo(&mut self) -> bool {
         let Some(shape) = self.shapes.pop() else {
             return false;
@@ -179,6 +194,7 @@ impl Document {
         true
     }
 
+    /// 重做最近撤销的标注。
     pub fn redo(&mut self) -> bool {
         let Some(shape) = self.undone.pop() else {
             return false;
@@ -191,6 +207,7 @@ impl Document {
         true
     }
 
+    /// 从底图重绘所有已提交标注。
     pub fn rebuild(&mut self) -> Result<()> {
         self.surface.pixels_mut().copy_from_slice(&self.base);
         for shape in &self.shapes {

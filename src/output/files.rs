@@ -10,6 +10,7 @@ use crate::util::error::{AppError, Result};
 
 /// 把画面编码为 PNG 并原子写入目标路径（先写临时文件，再 rename）。
 pub fn save_png(frame: &Frame, path: &Path) -> Result<()> {
+    // BGRA -> RGBA，alpha 统一为不透明。
     let mut rgba = frame.bgra.clone();
     for pixel in rgba.chunks_exact_mut(4) {
         pixel.swap(0, 2);
@@ -24,6 +25,7 @@ pub fn save_png(frame: &Frame, path: &Path) -> Result<()> {
     write_atomic(path, &bytes)
 }
 
+/// 写入字节，保证失败时目标路径不出现半成品。
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path
         .parent()
@@ -62,6 +64,7 @@ pub fn path_in(directory: &Path) -> PathBuf {
     directory.join(format!("Screen_{}.png", timestamp()))
 }
 
+/// 本地时间戳：`YYYYMMDD_HHMMSS_mmm`。
 #[allow(dead_code)]
 fn timestamp() -> String {
     let time = unsafe { GetLocalTime() };

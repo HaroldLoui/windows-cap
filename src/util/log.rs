@@ -1,3 +1,5 @@
+//! 日志初始化与 stderr/文件输出。
+
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;

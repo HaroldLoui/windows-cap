@@ -1,16 +1,4 @@
-//! 全屏遮罩：冻结帧、选区、标注、工具栏。
-//!
-//! 渲染方式（P3）：所有内容先合成到一块全屏 DIB（压暗背景 + 选区内容 + 预览 +
-//! chrome + 工具栏），再一次性 `BitBlt` 到窗口，避免逐层贴图造成的闪烁。
-//!
-//! 交互：
-//! - 拖拽创建选区；松手后保留，可继续移动/缩放（画出标注后锁定选区）
-//! - 工具：选择 / 画笔 / 直线 / 箭头 / 矩形 / 椭圆 / 文字 / 马赛克 / 序号
-//! - `Enter` / `Ctrl+C` / `Ctrl+S` / 双击：确认（复制 + 保存）
-//! - `Esc` / 右键 / 空白单击：取消
-//! - `Ctrl+Z` / `Ctrl+Y`：撤销/重做
-//! - 方向键移动选区，`Shift` + 方向键缩放（无标注时）
-//! - 文字工具用系统 `EDIT` 子窗口，支持中文 IME（回车提交、Shift+回车换行、Esc 取消）
+//! 全屏遮罩：冻结帧、选区、标注与工具栏。
 
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -60,24 +48,30 @@ const WM_FINISHED: u32 = WM_APP + 1;
 const TIMER_SCRIPT: usize = 1;
 const TIMER_TOOLTIP: usize = 2;
 
-/// 遮罩参数。
+/// 遮罩启动选项。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OverlayOptions {
-    /// 脚本化测试用：直接给出一个选区，延时后自动确认。
+    /// 脚本化测试选区；设置后延时自动确认。
     pub scripted: Option<RectI>,
+    /// 脚本确认前的延时（毫秒）。
     pub script_delay_ms: u32,
-    /// 是否允许“贴图”动作（常驻模式为 true）。
+    /// 是否允许贴图（常驻模式为 true）。
     pub allow_pin: bool,
 }
 
-/// 遮罩结果。
+/// 遮罩关闭后的结果。
 pub enum OverlayResult {
+    /// 已确认：输出图像与对应选区。
     Confirmed { image: Frame, rect: RectI },
+    /// 已贴图：仅输出图像。
     Pinned { image: Frame },
+    /// 已取消。
     Cancelled,
 }
 
+/// 打开全屏遮罩，等待用户确认、贴图或取消。
 pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Result<OverlayResult> {
+    // 步骤 1：准备压暗帧、合成缓冲与初始选区。
     let dimmed = dim_bgra(&frame.bgra);
     let dim = Dib::from_bgra(frame.width, frame.height, &dimmed)?;
     let composed = Dib::new(area.width as u32, area.height as u32)?;
@@ -90,6 +84,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
     }
 
     unsafe {
+        // 步骤 2：注册窗口类并创建置顶遮罩窗口。
         let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
         let mut window_class: WNDCLASSW = std::mem::zeroed();
         window_class.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
@@ -174,13 +169,13 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
                 return Err(error.into());
             }
         };
+        // 步骤 3：初始化 DPI、字体与工具栏，显示并聚焦窗口。
         overlay.hwnd = hwnd;
         overlay.ui_scale = (GetDpiForWindow(hwnd) as f32 / 96.0).max(1.0);
         overlay.font = create_font(overlay.ui_scale);
         overlay.refresh_toolbar();
 
-        // 遮罩本身不需要输入法：禁用它，否则按键会变成 VK_PROCESSKEY。
-        // 文字工具会为自己的 EDIT 单独创建 IME 上下文。
+        // 遮罩自身禁用 IME，避免按键变为 VK_PROCESSKEY；文字编辑框会另建上下文。
         let _ = ImmAssociateContext(hwnd, HIMC(null_mut()));
 
         let transitions_disabled: i32 = 1;
@@ -215,6 +210,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             );
         }
 
+        // 步骤 4：运行消息循环，直到窗口结束。
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).0 > 0 {
             if message.message == WM_FINISHED {
@@ -224,6 +220,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             DispatchMessageW(&message);
         }
 
+        // 步骤 5：销毁窗口、恢复前台窗口并汇总结果。
         if IsWindow(Some(hwnd)).0 != 0 {
             let _ = DestroyWindow(hwnd);
         }
@@ -252,12 +249,14 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
     }
 }
 
+/// 标注拖拽状态：文档坐标下的起点、当前点与画笔轨迹。
 struct ShapeDrag {
     start: Point,
     current: Point,
     points: Vec<Point>,
 }
 
+/// 文字输入框的移动/缩放拖拽，坐标为遮罩客户区。
 #[derive(Clone, Copy)]
 enum TextDrag {
     Move {
@@ -270,6 +269,7 @@ enum TextDrag {
     },
 }
 
+/// 遮罩窗口的运行时状态与 GDI 资源。
 struct Overlay {
     hwnd: HWND,
     area: VirtualScreen,
@@ -310,10 +310,12 @@ struct Overlay {
 }
 
 impl Overlay {
+    /// 整个虚拟屏幕的矩形（屏幕坐标）。
     fn area_rect(&self) -> RectI {
         RectI::new(self.area.x, self.area.y, self.area.width, self.area.height)
     }
 
+    /// 屏幕坐标矩形转遮罩客户区坐标。
     fn to_local(&self, rect: RectI) -> RectI {
         RectI::new(
             rect.x - self.area.x,
@@ -323,6 +325,7 @@ impl Overlay {
         )
     }
 
+    /// 文档中是否已有标注。
     fn has_shapes(&self) -> bool {
         self.document
             .as_ref()
@@ -330,6 +333,7 @@ impl Overlay {
             .unwrap_or(false)
     }
 
+    /// 按当前选区创建或复用标注文档；已有标注时不重建。
     fn setup_document(&mut self) -> Result<()> {
         let Some(rect) = self.selection.rect() else {
             self.document = None;
@@ -355,7 +359,7 @@ impl Overlay {
         Ok(())
     }
 
-    /// 把冻结帧中选区位置的亮色像素直接拷进合成缓冲（不分配、不重建文档）。
+    /// 把冻结帧中选区像素直接拷入合成缓冲，不重建文档。
     fn copy_frame_region(&mut self, current: RectI) {
         let area_width = self.area.width as usize;
         let area_height = self.area.height as usize;
@@ -381,6 +385,7 @@ impl Overlay {
         }
     }
 
+    /// 按当前选区、工具与撤销状态重排工具栏。
     fn refresh_toolbar(&mut self) {
         let layout_rect = if self.selection.rect().is_some() {
             self.selection.current_rect()
@@ -409,6 +414,7 @@ impl Overlay {
         self.toolbar_hover = None;
     }
 
+    /// 按选区导出图像；无选区时导出整个虚拟屏幕。
     fn export_image(&self) -> Option<Frame> {
         let selection = self.selection.rect();
         let rect = selection.unwrap_or_else(|| self.area_rect());
@@ -424,6 +430,7 @@ impl Overlay {
         }
     }
 
+    /// 确认当前结果并关闭遮罩。
     fn confirm(&mut self) {
         if self.result.is_some() {
             return;
@@ -443,6 +450,7 @@ impl Overlay {
         self.finish(OverlayResult::Confirmed { image, rect });
     }
 
+    /// 将当前图像作为贴图返回。
     fn pin_image(&mut self) {
         if self.result.is_some() {
             return;
@@ -455,11 +463,13 @@ impl Overlay {
         self.finish(OverlayResult::Pinned { image });
     }
 
+    /// 取消并关闭遮罩。
     fn cancel(&mut self) {
         self.close_text_editor();
         self.finish(OverlayResult::Cancelled);
     }
 
+    /// 记录结果、销毁窗口并结束消息循环。
     fn finish(&mut self, result: OverlayResult) {
         if self.result.is_some() {
             return;
@@ -475,6 +485,7 @@ impl Overlay {
         }
     }
 
+    /// 关闭文字输入框并把焦点交回遮罩。
     fn close_text_editor(&mut self) {
         self.text_drag = None;
         if let Some(editor) = self.text_editor.take() {
@@ -485,7 +496,9 @@ impl Overlay {
         }
     }
 
+    /// 关闭输入框，并把非空文字提交为标注。
     fn commit_text(&mut self) {
+        // 步骤 1：读取文字、锚点与宽度后销毁输入框。
         self.text_drag = None;
         let Some(editor) = self.text_editor.take() else {
             return;
@@ -495,6 +508,7 @@ impl Overlay {
         let (editor_width, _) = editor.size();
         drop(editor);
 
+        // 步骤 2：非空文字转为文档坐标下的标注，并恢复遮罩焦点。
         let trimmed = text.trim();
         if !trimmed.is_empty() {
             let max_width = self
@@ -526,13 +540,16 @@ impl Overlay {
         self.invalidate();
     }
 
+    /// 放弃当前文字输入并关闭输入框。
     fn cancel_text(&mut self) {
         self.close_text_editor();
         self.invalidate();
     }
 
+    /// 将背景、选区、预览与界面合成到后备 DIB。
     fn compose(&mut self) {
         unsafe {
+            // 步骤 1：铺压暗的全屏背景。
             let hdc = self.composed.dc;
             let _ = BitBlt(
                 hdc,
@@ -546,13 +563,14 @@ impl Overlay {
                 SRCCOPY,
             );
 
+            // 步骤 2：无选区时只绘制操作提示。
             let Some(current) = self.selection.current_rect() else {
                 self.draw_hint(hdc);
                 return;
             };
             let local = self.to_local(current);
 
-            // 有标注时贴文档表面（含标注）；否则直接从冻结帧拷亮区，拖动/缩放时不再重建文档。
+            // 步骤 3：贴入选区亮区；有标注时用文档表面，拖动/缩放时无需重建文档。
             let mut blitted_from_document = false;
             if self.has_shapes()
                 && let Some(document) = &self.document
@@ -577,6 +595,7 @@ impl Overlay {
                 self.copy_frame_region(current);
             }
 
+            // 步骤 4：叠加正在拖拽的标注预览。
             if let Some(drag) = &self.drag
                 && let Some(shape) = self.preview_shape(drag)
             {
@@ -598,6 +617,7 @@ impl Overlay {
                 }
             }
 
+            // 步骤 5：绘制选区边框、工具栏、提示与文字输入框。
             self.draw_chrome(hdc, current);
             if let Some(toolbar) = &self.toolbar {
                 toolbar.paint(hdc, self.font, self.toolbar_hover);
@@ -607,6 +627,7 @@ impl Overlay {
         }
     }
 
+    /// 响应 WM_PAINT：合成后一次 BitBlt 上屏。
     fn paint(&mut self) {
         unsafe {
             let mut paint = PAINTSTRUCT::default();
@@ -616,7 +637,9 @@ impl Overlay {
             }
             let started = Instant::now();
 
+            // 步骤 1：合成完整画面到后备 DIB。
             self.compose();
+            // 步骤 2：一次 BitBlt 上屏，避免逐层绘制闪烁。
             let _ = BitBlt(
                 hdc,
                 0,
@@ -631,6 +654,7 @@ impl Overlay {
 
             let _ = EndPaint(self.hwnd, &paint);
 
+            // 步骤 3：记录首帧与平均绘制耗时。
             self.paints += 1;
             self.paint_total_ms += started.elapsed().as_secs_f64() * 1000.0;
             if self.first_paint_ms.is_none() {
@@ -643,6 +667,7 @@ impl Overlay {
         }
     }
 
+    /// 绘制选区边框、控制点与尺寸标签。
     unsafe fn draw_chrome(&self, hdc: windows::Win32::Graphics::Gdi::HDC, rect: RectI) {
         unsafe {
             let local = self.to_local(rect);
@@ -694,6 +719,7 @@ impl Overlay {
         }
     }
 
+    /// 绘制空选区时的操作提示。
     unsafe fn draw_hint(&self, hdc: windows::Win32::Graphics::Gdi::HDC) {
         unsafe {
             let center_x = self.area.width / 2;
@@ -702,6 +728,7 @@ impl Overlay {
         }
     }
 
+    /// 在指定中心绘制带背景的提示文字。
     unsafe fn draw_chip(
         &self,
         hdc: windows::Win32::Graphics::Gdi::HDC,
@@ -750,6 +777,7 @@ impl Overlay {
         }
     }
 
+    /// 绘制工具栏悬停提示。
     unsafe fn draw_tooltip(&self, hdc: windows::Win32::Graphics::Gdi::HDC) {
         let Some(action) = self.tooltip_action else {
             return;
@@ -808,6 +836,7 @@ impl Overlay {
         }
     }
 
+    /// 绘制文字输入框边框、四角与缩放手柄。
     unsafe fn draw_text_frame(&self, hdc: windows::Win32::Graphics::Gdi::HDC) {
         let Some(editor) = &self.text_editor else {
             return;
@@ -848,6 +877,7 @@ impl Overlay {
         }
     }
 
+    /// 鼠标客户区坐标转屏幕坐标。
     fn screen_point(&self, lparam: LPARAM) -> (i32, i32) {
         (
             loword(lparam.0) + self.area.x,
@@ -855,11 +885,13 @@ impl Overlay {
         )
     }
 
+    /// 屏幕坐标转文档局部坐标。
     fn doc_point(&self, screen: (i32, i32)) -> Option<Point> {
         let rect = self.selection.rect()?;
         Some((screen.0 - rect.x, screen.1 - rect.y))
     }
 
+    /// 根据当前拖拽与工具生成预览标注。
     fn preview_shape(&self, drag: &ShapeDrag) -> Option<Shape> {
         let moved =
             (drag.current.0 - drag.start.0).abs() + (drag.current.1 - drag.start.1).abs() >= 2;
@@ -928,6 +960,7 @@ impl Overlay {
         Some(Shape::new(kind, color, width))
     }
 
+    /// 在文档坐标开始标注拖拽；文字工具改为打开输入框。
     fn start_drag(&mut self, screen: (i32, i32)) {
         let Some(position) = self.doc_point(screen) else {
             return;
@@ -935,7 +968,7 @@ impl Overlay {
 
         if self.tool == Tool::Text {
             let client = (screen.0 - self.area.x, screen.1 - self.area.y);
-            // 先用当前合成结果作为输入框背景，保证看起来是透明的。
+            // 步骤 1：文字工具先合成当前画面，作为透明输入框的背景。
             self.compose();
             match TextEditor::open(
                 self.hwnd,
@@ -948,6 +981,7 @@ impl Overlay {
                 Ok(editor) => {
                     let edit_hwnd = editor.hwnd;
                     self.text_editor = Some(editor);
+                    // 步骤 2：把键盘焦点交给 EDIT，后续输入由其处理。
                     unsafe {
                         let _ = SetFocus(Some(edit_hwnd));
                     }
@@ -971,6 +1005,7 @@ impl Overlay {
         self.invalidate();
     }
 
+    /// 更新拖拽终点及画笔采样点。
     fn update_drag(&mut self, screen: (i32, i32)) {
         let Some(rect) = self.selection.rect() else {
             return;
@@ -992,6 +1027,7 @@ impl Overlay {
         }
     }
 
+    /// 结束拖拽并把预览标注提交到文档。
     fn finish_drag(&mut self) {
         let Some(drag) = self.drag.take() else {
             return;
@@ -1012,6 +1048,7 @@ impl Overlay {
         self.invalidate();
     }
 
+    /// 执行工具栏动作并刷新界面。
     fn apply_action(&mut self, action: ToolbarAction) {
         match action {
             ToolbarAction::Tool(tool) => self.tool = tool,
@@ -1048,7 +1085,9 @@ impl Overlay {
         self.invalidate();
     }
 
+    /// 处理左键按下：文字框操作、工具栏、选区与标注。
     fn on_mouse_down(&mut self, screen: (i32, i32)) {
+        // 步骤 1：关闭提示，并优先处理文字框的缩放手柄或移动边框。
         self.tooltip_action = None;
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_TOOLTIP);
@@ -1087,6 +1126,7 @@ impl Overlay {
             self.has_shapes()
         );
 
+        // 步骤 2：命中工具栏则执行对应动作。
         let client = (screen.0 - self.area.x, screen.1 - self.area.y);
         let action = self
             .toolbar
@@ -1098,6 +1138,7 @@ impl Overlay {
             return;
         }
 
+        // 步骤 3：按命中位置开始标注、移动/缩放选区或重新框选。
         if let Some(rect) = self.selection.rect() {
             if inside(rect, screen) {
                 if self.has_shapes() || self.tool != Tool::Select {
@@ -1129,10 +1170,12 @@ impl Overlay {
         self.invalidate();
     }
 
+    /// 处理鼠标移动：拖拽、框选、工具栏悬停与光标。
     fn on_mouse_move(&mut self, screen: (i32, i32)) {
         self.cursor = screen;
         let mut needs_paint = false;
 
+        // 步骤 1：文字框拖拽优先，处理移动或缩放。
         if let Some(drag) = self.text_drag {
             let client = (screen.0 - self.area.x, screen.1 - self.area.y);
             let area = self.area;
@@ -1164,6 +1207,7 @@ impl Overlay {
             return;
         }
 
+        // 步骤 2：更新标注拖拽或选区框选。
         if self.drag.is_some() {
             self.update_drag(screen);
             needs_paint = true;
@@ -1173,6 +1217,7 @@ impl Overlay {
             needs_paint = true;
         }
 
+        // 步骤 3：更新工具栏悬停状态与提示定时器。
         let client = (screen.0 - self.area.x, screen.1 - self.area.y);
         let hover = self
             .toolbar
@@ -1193,10 +1238,13 @@ impl Overlay {
             self.invalidate();
         }
 
+        // 步骤 4：按最新状态刷新光标。
         self.update_cursor();
     }
 
+    /// 处理左键释放：结束文字拖拽、标注或框选。
     fn on_mouse_up(&mut self, screen: (i32, i32)) {
+        // 步骤 1：结束文字框拖拽，并把焦点还给 EDIT。
         if self.text_drag.take().is_some() {
             unsafe {
                 let _ = ReleaseCapture();
@@ -1210,6 +1258,7 @@ impl Overlay {
             return;
         }
 
+        // 步骤 2：落下标注，或结束选区框选并创建文档。
         if self.drag.is_some() {
             self.update_drag(screen);
             self.finish_drag();
@@ -1239,13 +1288,15 @@ impl Overlay {
         }
     }
 
+    /// 处理遮罩键盘快捷键。
     fn handle_key(&mut self, wparam: WPARAM) {
+        // 步骤 1：文字输入期间按键归 EDIT，遮罩不处理。
         if self.text_editor.is_some() {
             return;
         }
 
+        // 步骤 2：IME 的 VK_PROCESSKEY 用 ImmGetVirtualKey 还原真实按键。
         let mut key = wparam.0 as u16;
-        // 有 IME 时 WM_KEYDOWN 的键码是 VK_PROCESSKEY，用 ImmGetVirtualKey 还原真实按键。
         if key == VK_PROCESSKEY.0 {
             key = unsafe { ImmGetVirtualKey(self.hwnd) } as u16;
         }
@@ -1253,6 +1304,7 @@ impl Overlay {
         let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
         ::log::debug!("key down {key:#06x} ctrl={ctrl} shift={shift}");
 
+        // 步骤 3：Ctrl 快捷键：确认、撤销/重做。
         if ctrl {
             match key {
                 key if key == b'C' as u16 || key == b'S' as u16 => self.confirm(),
@@ -1279,6 +1331,7 @@ impl Overlay {
             return;
         }
 
+        // 步骤 4：普通快捷键：取消、确认、方向键、线宽与工具。
         match key {
             key if key == VK_ESCAPE.0 => self.cancel(),
             key if key == VK_RETURN.0 => self.confirm(),
@@ -1307,6 +1360,7 @@ impl Overlay {
         }
     }
 
+    /// 方向键移动选区；resize 为 true 时缩放。
     fn nudge(&mut self, dx: i32, dy: i32, resize: bool) {
         if self.has_shapes() {
             return;
@@ -1319,6 +1373,7 @@ impl Overlay {
         self.invalidate();
     }
 
+    /// 按当前命中区域更新鼠标光标。
     fn update_cursor(&self) {
         let client = (self.cursor.0 - self.area.x, self.cursor.1 - self.area.y);
 
@@ -1390,6 +1445,7 @@ impl Overlay {
         }
     }
 
+    /// 请求重绘整个遮罩。
     fn invalidate(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
@@ -1399,6 +1455,7 @@ impl Overlay {
 
 impl Drop for Overlay {
     fn drop(&mut self) {
+        // 字体与画刷由 Overlay 持有，统一在此释放。
         unsafe {
             if !self.font.0.is_null() {
                 let _ = DeleteObject(HGDIOBJ(self.font.0));
@@ -1410,6 +1467,7 @@ impl Drop for Overlay {
     }
 }
 
+/// 生成压暗且不透明的 BGRA 副本。
 fn dim_bgra(bgra: &[u8]) -> Vec<u8> {
     const FACTOR: u16 = 115;
     let mut dimmed = bgra.to_vec();
@@ -1422,6 +1480,7 @@ fn dim_bgra(bgra: &[u8]) -> Vec<u8> {
     dimmed
 }
 
+/// 按 DPI 创建界面字体；失败时退回系统默认字体。
 fn create_font(scale: f32) -> HFONT {
     let height = -((15.0 * scale).round() as i32).max(10);
     unsafe {
@@ -1449,6 +1508,7 @@ fn create_font(scale: f32) -> HFONT {
     }
 }
 
+/// 尽力把窗口置前；必要时临时附加前台线程输入队列。
 fn force_foreground(hwnd: HWND) -> bool {
     unsafe {
         if SetForegroundWindow(hwnd).0 != 0 {
@@ -1469,6 +1529,7 @@ fn force_foreground(hwnd: HWND) -> bool {
     }
 }
 
+/// 用画刷填充客户区矩形。
 unsafe fn fill(
     hdc: windows::Win32::Graphics::Gdi::HDC,
     x: i32,
@@ -1488,6 +1549,7 @@ unsafe fn fill(
     }
 }
 
+/// 判断点是否位于矩形内（右、下边界不含）。
 fn inside(rect: RectI, point: (i32, i32)) -> bool {
     point.0 >= rect.x
         && point.1 >= rect.y
@@ -1495,6 +1557,7 @@ fn inside(rect: RectI, point: (i32, i32)) -> bool {
         && point.1 < rect.y + rect.height
 }
 
+/// ARGB 转 COLORREF（GDI 的 0x00BBGGRR）。
 fn argb_to_colorref(argb: u32) -> COLORREF {
     let r = (argb >> 16) & 0xFF;
     let g = (argb >> 8) & 0xFF;
@@ -1502,6 +1565,7 @@ fn argb_to_colorref(argb: u32) -> COLORREF {
     COLORREF((b << 16) | (g << 8) | r)
 }
 
+/// 返回工具栏动作的提示文字。
 fn tooltip_text(action: ToolbarAction) -> String {
     match action {
         ToolbarAction::Tool(tool) => format!(
@@ -1527,14 +1591,17 @@ fn tooltip_text(action: ToolbarAction) -> String {
     }
 }
 
+/// 取 LPARAM 低 16 位的带符号值。
 fn loword(value: isize) -> i32 {
     ((value as usize) & 0xFFFF) as u16 as i16 as i32
 }
 
+/// 取 LPARAM 高 16 位的带符号值。
 fn hiword(value: isize) -> i32 {
     (((value as usize) >> 16) & 0xFFFF) as u16 as i16 as i32
 }
 
+/// 取窗口绑定的 Overlay 状态（仅窗口存续期内有效）。
 unsafe fn state(hwnd: HWND) -> Option<&'static mut Overlay> {
     unsafe {
         let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Overlay;
@@ -1546,13 +1613,16 @@ unsafe fn state(hwnd: HWND) -> Option<&'static mut Overlay> {
     }
 }
 
+/// 遮罩窗口过程：转发绘制、输入与文字编辑消息。
 unsafe extern "system" fn overlay_wndproc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // SAFETY: Overlay 指针由 WM_NCCREATE 写入，窗口销毁前保持有效。
     unsafe {
+        // 步骤 1：创建时把 Overlay 指针绑定到 GWLP_USERDATA。
         match message {
             WM_NCCREATE => {
                 let create =
@@ -1569,6 +1639,7 @@ unsafe extern "system" fn overlay_wndproc(
                 }
                 LRESULT(0)
             }
+            // 步骤 2：绘制、鼠标、键盘与光标消息。
             WM_ERASEBKGND => LRESULT(1),
             WM_PAINT => {
                 if let Some(overlay) = state(hwnd) {
@@ -1623,6 +1694,7 @@ unsafe extern "system" fn overlay_wndproc(
                 }
                 LRESULT(1)
             }
+            // 步骤 3：定时器与文字编辑消息。
             WM_TIMER => {
                 if let Some(overlay) = state(hwnd) {
                     match wparam.0 {
@@ -1651,6 +1723,7 @@ unsafe extern "system" fn overlay_wndproc(
                 }
                 LRESULT(0)
             }
+            // 步骤 4：EDIT 文字颜色跟随当前色，背景保持透明。
             WM_CTLCOLOREDIT => {
                 if let Some(overlay) = state(hwnd) {
                     let hdc = HDC(wparam.0 as *mut c_void);

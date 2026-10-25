@@ -1,6 +1,4 @@
-//! GDI+ 渲染：把 `Shape` 光栅化到 DIB（文档表面）或窗口/合成缓冲 DC。
-//!
-//! 所有尺寸使用像素单位（`UnitPixel`），保证预览与导出完全一致。
+//! GDI+ 渲染：把形状光栅化到文档 DIB 或窗口 DC。
 
 use std::ptr::null_mut;
 use std::sync::Once;
@@ -51,7 +49,7 @@ pub fn init() -> Result<()> {
     }
 }
 
-/// 把形状画进文档表面（`offset` 只对矢量形状有意义）。
+/// 把形状绘制到文档表面；`offset` 仅用于矢量形状。
 pub fn draw_shape(surface: &mut Dib, shape: &Shape, offset: Point) -> Result<()> {
     init()?;
     match &shape.kind {
@@ -63,7 +61,7 @@ pub fn draw_shape(surface: &mut Dib, shape: &Shape, offset: Point) -> Result<()>
     }
 }
 
-/// 把矢量形状画到任意 DC（用于遮罩合成缓冲上的实时预览）。
+/// 把矢量形状绘制到任意 DC。
 pub fn draw_vector(hdc: HDC, shape: &Shape, offset: Point) -> Result<()> {
     init()?;
     unsafe {
@@ -72,6 +70,7 @@ pub fn draw_vector(hdc: HDC, shape: &Shape, offset: Point) -> Result<()> {
 
         let result = (|| -> Result<()> {
             let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+            // 统一使用像素单位，保证预览与导出一致。
             let _ = GdipSetPageUnit(graphics, UnitPixel);
             let _ = GdipSetTextRenderingHint(graphics, TextRenderingHintAntiAliasGridFit);
             if offset != (0, 0) {
@@ -92,7 +91,9 @@ pub fn draw_vector(hdc: HDC, shape: &Shape, offset: Point) -> Result<()> {
     }
 }
 
+/// 按形状类型绘制。
 fn draw_kind(graphics: *mut GpGraphics, shape: &Shape) -> Result<()> {
+    // 步骤 1：绘制基础矢量形状，临时 GDI+ 对象用后立即释放。
     let color = shape.stroke.color;
     let width = shape.stroke.width.max(1.0);
 
@@ -183,6 +184,7 @@ fn draw_kind(graphics: *mut GpGraphics, shape: &Shape) -> Result<()> {
                 let _ = GdipDeletePen(pen);
                 check(status, "GdipDrawLines")?;
             }
+            // 步骤 2：绘制文字标注。
             ShapeKind::Text {
                 pos,
                 text,
@@ -199,6 +201,7 @@ fn draw_kind(graphics: *mut GpGraphics, shape: &Shape) -> Result<()> {
                     *max_width,
                 )?;
             }
+            // 步骤 3：绘制序号；马赛克由 draw_shape 的像素路径处理。
             ShapeKind::Step { center, index } => {
                 let label = index.to_string();
                 let digits = label.chars().count();
@@ -245,6 +248,7 @@ fn draw_kind(graphics: *mut GpGraphics, shape: &Shape) -> Result<()> {
     Ok(())
 }
 
+/// 在指定位置绘制文本。
 fn draw_text_at(
     graphics: *mut GpGraphics,
     text: &str,
@@ -263,6 +267,7 @@ fn draw_text_at(
     draw_text(graphics, text, rect, size, color, false, max_width > 0.0)
 }
 
+/// 在矩形内居中绘制文本。
 fn draw_text_centered(
     graphics: *mut GpGraphics,
     text: &str,
@@ -273,6 +278,7 @@ fn draw_text_centered(
     draw_text(graphics, text, rect, size, color, true, false)
 }
 
+/// 绘制文本并释放临时 GDI+ 对象。
 fn draw_text(
     graphics: *mut GpGraphics,
     text: &str,
@@ -346,6 +352,7 @@ fn draw_text(
     }
 }
 
+/// 计算箭头两翼端点。
 fn arrow_head(a: Point, b: Point, width: f32) -> ((f32, f32), (f32, f32)) {
     let dx = (a.0 - b.0) as f32;
     let dy = (a.1 - b.1) as f32;
@@ -365,6 +372,7 @@ fn arrow_head(a: Point, b: Point, width: f32) -> ((f32, f32), (f32, f32)) {
     (p1, p2)
 }
 
+/// 由两个对角点返回左上角与宽高。
 fn normalized(a: Point, b: Point) -> (f32, f32, f32, f32) {
     let left = a.0.min(b.0) as f32;
     let top = a.1.min(b.1) as f32;
@@ -373,6 +381,7 @@ fn normalized(a: Point, b: Point) -> (f32, f32, f32, f32) {
     (left, top, width, height)
 }
 
+/// 文档坐标点转为 GDI+ 浮点坐标。
 fn pf(point: Point) -> PointF {
     PointF {
         X: point.0 as f32,
@@ -380,6 +389,7 @@ fn pf(point: Point) -> PointF {
     }
 }
 
+/// 将 GDI+ 状态转为 Result。
 fn check(status: Status, what: &str) -> Result<()> {
     if status.0 == 0 {
         Ok(())
@@ -391,6 +401,7 @@ fn check(status: Status, what: &str) -> Result<()> {
     }
 }
 
+/// 把矩形区域马赛克化。
 fn apply_mosaic(surface: &mut Dib, a: Point, b: Point, block: u32) {
     let width = surface.width as i32;
     let height = surface.height as i32;

@@ -12,6 +12,7 @@ use windows::core::w;
 
 use crate::util::error::{AppError, Result};
 
+/// 是否已写入开机自启项。
 pub fn is_enabled() -> bool {
     let mut buffer = [0u16; 1024];
     let mut size = (buffer.len() * 2) as u32;
@@ -29,6 +30,7 @@ pub fn is_enabled() -> bool {
     status == ERROR_SUCCESS && size > 2
 }
 
+/// 启用或关闭开机自启。
 pub fn set_enabled(enabled: bool) -> Result<()> {
     let mut key = HKEY(null_mut());
     let status = unsafe {
@@ -93,6 +95,7 @@ pub fn describe() -> String {
     format!("已启用，命令: {command}")
 }
 
+/// 执行命令行传入的自启操作。
 pub fn run(action: super::cli::AutoStartAction) -> Result<()> {
     use super::cli::AutoStartAction;
     match action {

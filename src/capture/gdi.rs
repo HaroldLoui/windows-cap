@@ -1,3 +1,5 @@
+//! GDI `BitBlt` 采集实现。
+
 use windows::Win32::Graphics::Gdi::{BitBlt, CAPTUREBLT, GetDC, ROP_CODE, ReleaseDC, SRCCOPY};
 
 use crate::capture::{Frame, VirtualScreen};
@@ -13,6 +15,7 @@ pub fn capture(area: VirtualScreen) -> Result<Frame> {
         )));
     }
 
+    // SAFETY: GetDC/ReleaseDC 成对；DIB 在闭包结束时由 Drop 释放。
     unsafe {
         let screen = GetDC(None);
         if screen.0.is_null() {
@@ -21,6 +24,7 @@ pub fn capture(area: VirtualScreen) -> Result<Frame> {
 
         let result = (|| -> Result<Frame> {
             let dib = Dib::new(area.width as u32, area.height as u32)?;
+            // CAPTUREBLT 让分层窗口也参与采集。
             BitBlt(
                 dib.dc,
                 0,

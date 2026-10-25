@@ -1,9 +1,4 @@
-//! P0 技术验证（Spike）。
-//!
-//! - `capture`：GDI 是否能正确截取虚拟桌面（含多屏/DPI 信息）
-//! - `focus`：全屏置顶窗口能否抢到焦点并接收键盘
-//! - `ime`：EDIT 子窗口是否有 IME 上下文
-//! - `gdiplus`：4K DIB 上 GDI+ 绘制 8 种形状的性能
+//! P0 技术验证（Spike）：GDI 采集、焦点、IME 与 GDI+ 绘制性能。
 
 use std::mem::size_of;
 use std::ptr::null_mut;
@@ -55,6 +50,7 @@ const IME_CLASS: PCWSTR = w!("window_cap_spike_ime");
 
 static ESC_RECEIVED: AtomicBool = AtomicBool::new(false);
 
+/// 按名称运行对应的 spike。
 pub fn run(name: &str) -> Result<()> {
     match name {
         "capture" | "s1" => capture_spike(),
@@ -67,6 +63,7 @@ pub fn run(name: &str) -> Result<()> {
     }
 }
 
+/// 验证 GDI 能否截取虚拟桌面并保存 PNG。
 fn capture_spike() -> Result<()> {
     let screen = VirtualScreen::current();
     println!(
@@ -122,9 +119,11 @@ fn capture_spike() -> Result<()> {
     Ok(())
 }
 
+/// 验证 4K DIB 上 GDI+ 绘制 8 种形状与中文文本的性能。
 fn gdiplus_spike() -> Result<()> {
     let dib = Dib::new(3840, 2160)?;
 
+    // 步骤 1：启动 GDI+ 并绑定 DIB 的内存 DC。
     unsafe {
         let mut token = 0usize;
         let input = GdiplusStartupInput {
@@ -147,6 +146,7 @@ fn gdiplus_spike() -> Result<()> {
         let _ = GdipSetPageUnit(graphics, UnitPixel);
         let _ = GdipSetTextRenderingHint(graphics, TextRenderingHintAntiAliasGridFit);
 
+        // 步骤 2：准备画笔、画刷、字体与文本格式。
         let mut pen: *mut GpPen = null_mut();
         check(
             GdipCreatePen1(0xFFFF9B2E, 8.0, UnitPixel, &mut pen),
@@ -209,6 +209,7 @@ fn gdiplus_spike() -> Result<()> {
             Height: 220.0,
         };
 
+        // 步骤 3：重复绘制 8 种形状并计时。
         let iterations = 10u32;
         let started = Instant::now();
         for index in 0..iterations {
@@ -238,6 +239,7 @@ fn gdiplus_spike() -> Result<()> {
             );
         }
         let elapsed = started.elapsed();
+        // 步骤 4：刷新输出、统计文字像素并释放 GDI+ 资源。
         let _ = GdipFlush(graphics, FlushIntentionSync);
 
         let lit = count_lit_region(dib.pixels(), 3840, 1200, 1700, 3000, 1920);
@@ -268,9 +270,11 @@ fn gdiplus_spike() -> Result<()> {
     Ok(())
 }
 
+/// 验证全屏置顶窗口能否取得焦点并接收键盘输入。
 fn focus_spike() -> Result<()> {
     let screen = VirtualScreen::current();
 
+    // 步骤 1：注册并创建与虚拟桌面等大的置顶窗口。
     unsafe {
         let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
         let mut window_class: WNDCLASSW = std::mem::zeroed();
@@ -296,6 +300,7 @@ fn focus_spike() -> Result<()> {
         )?;
 
         let _ = ShowWindow(hwnd, SW_SHOW);
+        // 步骤 2：直接抢前台焦点，失败时用 AttachThreadInput 再试。
         let direct = SetForegroundWindow(hwnd).0 != 0;
         let mut focused = GetForegroundWindow() == hwnd;
 
@@ -323,6 +328,7 @@ fn focus_spike() -> Result<()> {
             "[S2] SetForegroundWindow 直接结果: {direct}; AttachThreadInput: {attached} -> {after_attach}; 最终前台: {focused}"
         );
 
+        // 步骤 3：注入 Esc 并运行消息循环（4 秒后由定时器退出）。
         if focused {
             std::thread::sleep(Duration::from_millis(250));
             send_key(VK_ESCAPE, KEYBD_EVENT_FLAGS(0));
@@ -335,6 +341,7 @@ fn focus_spike() -> Result<()> {
             DispatchMessageW(&message);
         }
 
+        // 步骤 4：清理窗口并输出结论。
         let _ = KillTimer(Some(hwnd), 1);
         if IsWindow(Some(hwnd)).0 != 0 {
             let _ = DestroyWindow(hwnd);
@@ -357,7 +364,9 @@ fn focus_spike() -> Result<()> {
     Ok(())
 }
 
+/// 验证 EDIT 子窗口是否具备 IME 上下文。
 fn ime_spike() -> Result<()> {
+    // 步骤 1：创建宿主窗口和 EDIT 子窗口。
     unsafe {
         let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
         let mut window_class: WNDCLASSW = std::mem::zeroed();
@@ -429,6 +438,7 @@ fn ime_spike() -> Result<()> {
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(Some(edit));
 
+        // 步骤 2：检查键盘布局与 EDIT 的 IME 上下文。
         let keyboard_layout = GetKeyboardLayout(0);
         let is_ime = ImmIsIME(keyboard_layout).0 != 0;
         let ime_context = ImmGetContext(edit);
@@ -443,6 +453,7 @@ fn ime_spike() -> Result<()> {
             let _ = ImmReleaseContext(edit, ime_context);
         }
 
+        // 步骤 3：2 秒后自动关闭，并清理窗口与字体。
         SetTimer(Some(hwnd), 2, 2000, None);
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).0 > 0 {
@@ -461,6 +472,7 @@ fn ime_spike() -> Result<()> {
     Ok(())
 }
 
+/// 把 GDI+ 状态码转成带上下文的错误。
 fn check(status: Status, what: &str) -> Result<()> {
     if status.0 == 0 {
         Ok(())
@@ -472,6 +484,7 @@ fn check(status: Status, what: &str) -> Result<()> {
     }
 }
 
+/// 注入一次键盘事件。
 fn send_key(virtual_key: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) {
     let input = INPUT {
         r#type: INPUT_KEYBOARD,
@@ -490,6 +503,7 @@ fn send_key(virtual_key: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) {
     }
 }
 
+/// 统计区域内非黑像素数量。
 fn count_lit_region(pixels: &[u8], width: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> usize {
     let mut count = 0;
     for y in y0..y1 {
@@ -504,6 +518,7 @@ fn count_lit_region(pixels: &[u8], width: u32, x0: u32, y0: u32, x1: u32, y1: u3
     count
 }
 
+/// spike 窗口过程：Esc 或定时器触发退出。
 unsafe extern "system" fn spike_wndproc(
     hwnd: HWND,
     message: u32,

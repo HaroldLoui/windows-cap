@@ -1,3 +1,5 @@
+//! window-cap 可执行入口：声明模块并运行应用。
+
 mod annotate;
 mod app;
 mod capture;

@@ -1,4 +1,4 @@
-//! 标注工具栏：两行纯图标布局、外部优先放置、GDI+ 绘制。
+//! 标注工具栏：两行图标布局、外部优先定位与 GDI+ 绘制。
 
 use std::ptr::null_mut;
 
@@ -32,6 +32,7 @@ const CLOSE_COLOR: u32 = 0xFFFF_7870;
 const CLOSE_HOVER: u32 = 0xCC7A_2A28;
 const SEPARATOR: u32 = 0x40FF_FFFF;
 
+/// 标注工具。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Select,
@@ -60,6 +61,7 @@ pub const TOOLS: [Tool; 10] = [
 ];
 
 impl Tool {
+    /// 返回工具快捷键。
     pub fn shortcut(self) -> u16 {
         match self {
             Tool::Select => b'V' as u16,
@@ -75,6 +77,7 @@ impl Tool {
         }
     }
 
+    /// 返回工具中文名。
     pub fn name(self) -> &'static str {
         match self {
             Tool::Select => "选择",
@@ -91,6 +94,7 @@ impl Tool {
     }
 }
 
+/// 工具栏可触发的动作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolbarAction {
     Tool(Tool),
@@ -116,6 +120,7 @@ pub const COLORS: [u32; 8] = [
     0xFF00_0000,
 ];
 
+/// 绘制工具栏所需的当前状态。
 #[derive(Clone, Copy, Debug)]
 pub struct ToolbarState {
     pub tool: Tool,
@@ -126,6 +131,7 @@ pub struct ToolbarState {
     pub can_pin: bool,
 }
 
+/// 内置矢量图标。
 #[derive(Clone, Copy)]
 enum Icon {
     Tool(Tool),
@@ -139,6 +145,7 @@ enum Icon {
     Plus,
 }
 
+/// 工具栏中的一个可点击按钮。
 struct Button {
     rect: RectI,
     action: ToolbarAction,
@@ -149,6 +156,7 @@ struct Button {
     active: bool,
 }
 
+/// 布局完成的两行工具栏。
 pub struct Toolbar {
     pub rect: RectI,
     buttons: Vec<Button>,
@@ -161,7 +169,9 @@ pub struct Toolbar {
 }
 
 impl Toolbar {
+    /// 按 DPI、选区与屏幕范围计算工具栏布局。
     pub fn layout(selection: RectI, area: VirtualScreen, scale: f32, state: &ToolbarState) -> Self {
+        // 步骤 1：按 DPI 取整计算单元格、间距与两行宽度。
         let scale = scale.max(1.0);
         let cell = (30.0 * scale).round() as i32;
         let gap = (4.0 * scale).round() as i32;
@@ -189,6 +199,7 @@ impl Toolbar {
         let panel_width = row1_width.max(row2_width) + pad * 2;
         let panel_height = pad * 2 + cell * 2 + gap;
 
+        // 步骤 2：优先放在选区外，并夹在屏幕范围内。
         let local = RectI::new(
             selection.x - area.x,
             selection.y - area.y,
@@ -206,7 +217,7 @@ impl Toolbar {
 
         let mut buttons = Vec::with_capacity(25);
 
-        // 第一行：10 个工具 + 分隔 + 撤销/重做/复制/保存/关闭
+        // 步骤 3：生成第一行工具与操作按钮。
         let row1_y = panel.y + pad;
         let mut x = panel.x + pad;
         for tool in TOOLS {
@@ -237,7 +248,7 @@ impl Toolbar {
             x += cell + gap;
         }
 
-        // 第二行：8 色 + 分隔 + 线宽 −/数值/+
+        // 步骤 4：生成第二行颜色与线宽按钮。
         let row2_y = panel.y + pad + cell + gap;
         let mut x = panel.x + pad;
         for color in COLORS {
@@ -299,6 +310,7 @@ impl Toolbar {
         }
     }
 
+    /// 返回坐标处命中的动作。
     pub fn hit(&self, x: i32, y: i32) -> Option<ToolbarAction> {
         self.buttons
             .iter()
@@ -311,7 +323,9 @@ impl Toolbar {
             .map(|button| button.action)
     }
 
+    /// 绘制工具栏面板、按钮与文字。
     pub fn paint(&self, hdc: HDC, font: HFONT, hover: Option<ToolbarAction>) {
+        // 步骤 1：初始化 GDI+ 并创建绘图对象。
         let _ = render::init();
         unsafe {
             let mut graphics: *mut GpGraphics = null_mut();
@@ -321,6 +335,7 @@ impl Toolbar {
             let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
             let s = self.scale;
 
+            // 步骤 2：绘制面板阴影、背景与行分隔线。
             let rect = self.rect;
             fill_rounded(
                 graphics,
@@ -351,7 +366,6 @@ impl Toolbar {
                 1.0 * s,
             );
 
-            // 分隔线只占各自那一行的高度。
             let inset = (5.0 * s).round() as i32;
             for (divider, row_y) in [
                 (self.row1_divider, self.row1_y),
@@ -368,6 +382,7 @@ impl Toolbar {
                 );
             }
 
+            // 步骤 3：按状态绘制按钮底色与图标。
             for button in &self.buttons {
                 let hovered = button.enabled
                     && !matches!(button.action, ToolbarAction::Noop)
@@ -453,6 +468,7 @@ impl Toolbar {
                 }
             }
 
+            // 步骤 4：刷出 GDI+ 结果后用 GDI 绘制文字，再释放绘图对象。
             let _ = GdipFlush(graphics, FlushIntentionSync);
 
             let old_font = SelectObject(hdc, HGDIOBJ(font.0));
@@ -482,6 +498,7 @@ impl Toolbar {
     }
 }
 
+/// 在选区外选择面板位置，并夹在屏幕内。
 fn place_panel(
     selection: RectI,
     screen_width: i32,
@@ -543,8 +560,9 @@ fn place_panel(
     )
 }
 
-// ---------------- GDI+ 基础绘制 ----------------
+// GDI+ 基础绘制：临时对象用后立即释放。
 
+/// 填充圆角矩形。
 unsafe fn fill_rounded(
     graphics: *mut GpGraphics,
     x: f32,
@@ -569,6 +587,7 @@ unsafe fn fill_rounded(
     }
 }
 
+/// 描边圆角矩形。
 #[allow(clippy::too_many_arguments)]
 unsafe fn stroke_rounded(
     graphics: *mut GpGraphics,
@@ -595,6 +614,7 @@ unsafe fn stroke_rounded(
     }
 }
 
+/// 把圆角矩形路径加入 GDI+ 路径。
 unsafe fn add_rounded_rect(path: *mut GpPath, x: f32, y: f32, w: f32, h: f32, r: f32) {
     unsafe {
         let d = 2.0 * r;
@@ -606,6 +626,7 @@ unsafe fn add_rounded_rect(path: *mut GpPath, x: f32, y: f32, w: f32, h: f32, r:
     }
 }
 
+/// 填充矩形。
 unsafe fn solid_fill(graphics: *mut GpGraphics, x: f32, y: f32, w: f32, h: f32, color: u32) {
     unsafe {
         let mut brush: *mut GpSolidFill = null_mut();
@@ -616,6 +637,7 @@ unsafe fn solid_fill(graphics: *mut GpGraphics, x: f32, y: f32, w: f32, h: f32, 
     }
 }
 
+/// 填充椭圆。
 unsafe fn fill_ellipse(graphics: *mut GpGraphics, x: f32, y: f32, w: f32, h: f32, color: u32) {
     unsafe {
         let mut brush: *mut GpSolidFill = null_mut();
@@ -626,6 +648,7 @@ unsafe fn fill_ellipse(graphics: *mut GpGraphics, x: f32, y: f32, w: f32, h: f32
     }
 }
 
+/// 描边椭圆。
 unsafe fn stroke_ellipse(
     graphics: *mut GpGraphics,
     x: f32,
@@ -644,6 +667,7 @@ unsafe fn stroke_ellipse(
     }
 }
 
+/// 画线段。
 unsafe fn stroke_line(
     graphics: *mut GpGraphics,
     x1: f32,
@@ -662,6 +686,7 @@ unsafe fn stroke_line(
     }
 }
 
+/// 画折线。
 unsafe fn stroke_lines(graphics: *mut GpGraphics, points: &[PointF], color: u32, thickness: f32) {
     unsafe {
         let mut pen: *mut GpPen = null_mut();
@@ -672,6 +697,7 @@ unsafe fn stroke_lines(graphics: *mut GpGraphics, points: &[PointF], color: u32,
     }
 }
 
+/// 画多边形轮廓。
 unsafe fn stroke_polygon(graphics: *mut GpGraphics, points: &[PointF], color: u32, thickness: f32) {
     unsafe {
         let mut pen: *mut GpPen = null_mut();
@@ -682,6 +708,7 @@ unsafe fn stroke_polygon(graphics: *mut GpGraphics, points: &[PointF], color: u3
     }
 }
 
+/// 填充多边形。
 unsafe fn fill_polygon(graphics: *mut GpGraphics, points: &[PointF], color: u32) {
     unsafe {
         let mut brush: *mut GpSolidFill = null_mut();
@@ -698,6 +725,7 @@ unsafe fn fill_polygon(graphics: *mut GpGraphics, points: &[PointF], color: u32)
     }
 }
 
+/// 描边矩形。
 unsafe fn stroke_rect(
     graphics: *mut GpGraphics,
     x: f32,
@@ -716,9 +744,9 @@ unsafe fn stroke_rect(
     }
 }
 
-// ---------------- 图标（18 单位坐标系） ----------------
+// 图标：统一使用 18 单位坐标系。
 
-/// 贴图窗口外侧的小操作条（复制/保存/关闭），风格与工具栏一致。
+/// 绘制贴图窗口外侧的复制、保存与关闭操作条。
 pub fn paint_pin_actions(hdc: HDC, hover: Option<usize>) {
     let _ = render::init();
     unsafe {
@@ -777,6 +805,7 @@ pub fn paint_pin_actions(hdc: HDC, hover: Option<usize>) {
     }
 }
 
+/// 在 18×18 坐标系中绘制指定图标。
 unsafe fn draw_icon(graphics: *mut GpGraphics, icon: Icon, x: f32, y: f32, s: f32, color: u32) {
     unsafe {
         let u = |v: f32| v * s;

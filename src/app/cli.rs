@@ -7,6 +7,7 @@ use clap::{Parser, ValueEnum};
 use crate::capture::RectI;
 use crate::util::error::{AppError, Result};
 
+/// 顶层命令行参数。
 #[derive(Parser, Debug)]
 #[command(
     name = "window-cap",
@@ -80,6 +81,7 @@ pub struct Cli {
     pub verbose: bool,
 }
 
+/// 开机自启动作。
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum AutoStartAction {
     On,
@@ -87,11 +89,13 @@ pub enum AutoStartAction {
     Status,
 }
 
+/// 解析后的参数。
 pub struct Parsed {
     pub verbose: bool,
     pub command: Command,
 }
 
+/// 本次运行的命令。
 pub enum Command {
     Resident {
         config: Option<PathBuf>,
@@ -108,6 +112,7 @@ pub enum Command {
     Autostart(AutoStartAction),
 }
 
+/// 无 UI 采集选项。
 #[derive(Default, Clone)]
 pub struct CaptureOptions {
     pub region: Option<RectI>,
@@ -152,6 +157,7 @@ where
 
 impl Cli {
     fn into_command(self) -> Result<Command> {
+        // 步骤 1：校验模式与采集选项组合。
         let capture_options_present = self.region.is_some()
             || self.output.is_some()
             || self.clipboard
@@ -188,6 +194,7 @@ impl Cli {
             return Err(AppError::msg("--last 与 --region 不能同时使用"));
         }
 
+        // 步骤 2：按优先级选择命令。
         if let Some(action) = self.autostart {
             return Ok(Command::Autostart(action));
         }

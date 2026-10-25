@@ -14,16 +14,19 @@ use windows::core::{PCWSTR, w};
 
 use crate::util::error::Result;
 
+/// 激活已有实例的消息。
 pub const WM_APP_ACTIVATE: u32 = WM_APP + 20;
 /// 转发消息标记（`WCAP`）。
 pub const FORWARD_MAGIC: usize = 0x5743_4150;
 
+/// 单实例互斥体。
 pub struct SingleInstance {
     handle: HANDLE,
     already_running: bool,
 }
 
 impl SingleInstance {
+    /// 获取单实例锁。
     pub fn acquire() -> Result<Self> {
         unsafe {
             let handle = CreateMutexW(None, false, w!("Local\\window-cap-singleton"))?;
@@ -35,6 +38,7 @@ impl SingleInstance {
         }
     }
 
+    /// 是否已有实例在运行。
     pub fn already_running(&self) -> bool {
         self.already_running
     }
@@ -61,7 +65,7 @@ pub fn activate_existing() -> bool {
     }
 }
 
-/// 把命令行参数转发给已运行的实例（`\x1f` 分隔）。
+/// 把命令行参数转发给已运行的实例。
 pub fn forward_to_existing(args: &[String]) -> bool {
     unsafe {
         let Ok(hwnd) = FindWindowW(w!("window_cap_hotkey"), PCWSTR::null()) else {
@@ -82,6 +86,7 @@ pub fn forward_to_existing(args: &[String]) -> bool {
             lpData: payload.as_ptr() as *mut c_void,
         };
 
+        // SAFETY: SendMessageW 同步返回，payload 与 data 在调用期间均有效。
         SendMessageW(
             hwnd,
             WM_COPYDATA,

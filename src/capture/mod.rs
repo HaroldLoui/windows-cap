@@ -1,7 +1,4 @@
-//! 屏幕采集：虚拟桌面、显示器枚举、GDI 后端。
-//!
-//! 坐标约定：全链路使用**物理像素**；`Frame.origin` 是画面左上角在虚拟桌面中的坐标，
-//! 因此 `Frame` 内部像素坐标 = 屏幕坐标 - origin。
+//! 屏幕采集：虚拟桌面、显示器枚举与 GDI 后端（坐标均为物理像素）。
 
 pub mod gdi;
 
@@ -29,6 +26,7 @@ pub struct VirtualScreen {
 }
 
 impl VirtualScreen {
+    /// 读取当前虚拟桌面矩形（所有显示器的并集）。
     pub fn current() -> Self {
         unsafe {
             Self {
@@ -40,14 +38,17 @@ impl VirtualScreen {
         }
     }
 
+    /// 虚拟桌面右边界坐标。
     pub fn right(&self) -> i32 {
         self.x + self.width
     }
 
+    /// 虚拟桌面下边界坐标。
     pub fn bottom(&self) -> i32 {
         self.y + self.height
     }
 
+    /// 判断矩形是否完全落在虚拟桌面内。
     pub fn contains(&self, rect: RectI) -> bool {
         rect.width > 0
             && rect.height > 0
@@ -68,6 +69,7 @@ pub struct RectI {
 }
 
 impl RectI {
+    /// 用屏幕坐标和尺寸构造矩形。
     pub const fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
         Self {
             x,
@@ -77,6 +79,7 @@ impl RectI {
         }
     }
 
+    /// 宽或高不为正时视为空。
     pub fn is_empty(&self) -> bool {
         self.width <= 0 || self.height <= 0
     }
@@ -115,6 +118,7 @@ impl std::fmt::Display for RectI {
     }
 }
 
+/// 单个显示器的设备名、矩形、主屏标记与有效 DPI。
 #[derive(Clone, Debug)]
 pub struct MonitorInfo {
     pub device: String,
@@ -124,7 +128,7 @@ pub struct MonitorInfo {
     pub dpi_y: u32,
 }
 
-/// 一张自顶向下的 32bpp 图像（BGRA）。
+/// 一张自顶向下的 32bpp BGRA 图像；origin 为左上角的虚拟桌面坐标。
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub width: u32,
@@ -219,9 +223,11 @@ impl Frame {
     }
 }
 
-/// 采集后端的统一接口；P2/P6 会增加 WGC 等实现。
+/// 采集后端统一接口，后续可扩展 WGC 等实现。
 pub trait CaptureBackend {
+    /// 后端名称。
     fn name(&self) -> &'static str;
+    /// 抓取指定屏幕区域。
     fn capture(&mut self, area: VirtualScreen) -> Result<Frame>;
 }
 
@@ -239,6 +245,7 @@ impl CaptureBackend for GdiBackend {
     }
 }
 
+/// 枚举所有显示器及其有效 DPI。
 pub fn monitors() -> Vec<MonitorInfo> {
     let mut list: Vec<MonitorInfo> = Vec::new();
     unsafe {
@@ -252,6 +259,7 @@ pub fn monitors() -> Vec<MonitorInfo> {
     list
 }
 
+/// `EnumDisplayMonitors` 回调：收集单个显示器的信息。
 unsafe extern "system" fn monitor_proc(
     monitor: HMONITOR,
     _hdc: HDC,
@@ -259,6 +267,7 @@ unsafe extern "system" fn monitor_proc(
     data: LPARAM,
 ) -> windows::core::BOOL {
     unsafe {
+        // SAFETY: data 指向 monitors() 栈上存活的 Vec。
         let list = &mut *(data.0 as *mut Vec<MonitorInfo>);
 
         let mut info = MONITORINFOEXW::default();

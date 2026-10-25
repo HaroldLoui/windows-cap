@@ -1,4 +1,4 @@
-//! 常驻模式：托盘、全局热键、单实例、配置热加载、延迟截图。
+//! 常驻模式：托盘、全局热键、单实例与截图流程。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,6 +40,7 @@ static CAPTURING: AtomicBool = AtomicBool::new(false);
 
 /// 常驻：托盘 + 全局热键 + 单实例。
 pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
+    // 步骤 1：单实例检查；已有实例则转发命令或激活。
     let single_instance = SingleInstance::acquire()?;
     if single_instance.already_running() {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -53,6 +54,7 @@ pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
+    // 步骤 2：初始化控制台与配置。
     hide_own_console();
 
     let path = Config::path(config_path.as_deref());
@@ -62,6 +64,7 @@ pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
         ::log::warn!("{warning}");
     }
 
+    // 步骤 3：创建隐藏窗口、托盘并注册热键。
     unsafe {
         let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
         let mut window_class: WNDCLASSW = std::mem::zeroed();
@@ -130,6 +133,7 @@ pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
             );
         }
 
+        // 步骤 4：进入消息循环，退出时清理资源。
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).0 > 0 {
             let _ = TranslateMessage(&message);
@@ -175,6 +179,7 @@ pub fn run_once(config_path: Option<PathBuf>, delay_ms: u64) -> Result<()> {
 
 /// 遮罩压力测试：脚本化选区，反复创建/绘制/确认遮罩，检查句柄泄漏。
 pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
+    // 步骤 1：确定脚本化选区。
     let screen = VirtualScreen::current();
     if screen.width <= 0 || screen.height <= 0 {
         return Err(AppError::msg("虚拟桌面尺寸无效"));
@@ -191,7 +196,7 @@ pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
 
     let mut backend = GdiBackend;
 
-    // GDI/USER 子系统会懒分配一批对象，先预热再取基线，避免误判泄漏。
+    // 步骤 2：预热，避免 GDI/USER 懒分配被误判为泄漏。
     let warmup = 3.min(iterations);
     for _ in 0..warmup {
         let frame = backend.capture(screen)?;
@@ -206,6 +211,7 @@ pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
         )?;
     }
 
+    // 步骤 3：循环创建遮罩并校验选区结果。
     let (gdi_before, user_before, memory_before) = process_resources()?;
     let started = Instant::now();
     let mut confirmed = 0u32;
@@ -239,6 +245,7 @@ pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
         }
     }
 
+    // 步骤 4：统计句柄与耗时并判定泄漏。
     let elapsed = started.elapsed();
     let (gdi_after, user_after, memory_after) = process_resources()?;
     let gdi_delta = gdi_after as i64 - gdi_before as i64;
@@ -313,6 +320,7 @@ fn capture_flow(
     config: &Config,
     allow_pin: bool,
 ) -> Result<Option<CaptureOutcome>> {
+    // 步骤 1：抓取整屏作为遮罩冻结帧。
     let screen = VirtualScreen::current();
     if screen.width <= 0 || screen.height <= 0 {
         return Err(AppError::msg("虚拟桌面尺寸无效"));
@@ -323,6 +331,7 @@ fn capture_flow(
     let frame = backend.capture(screen)?;
     let capture_ms = started.elapsed().as_secs_f64() * 1000.0;
 
+    // 步骤 2：进入遮罩完成选区与标注。
     let result = ui::select(
         frame,
         screen,
@@ -333,6 +342,7 @@ fn capture_flow(
         },
     )?;
 
+    // 步骤 3：按确认结果输出图片、贴图或结束。
     match result {
         OverlayResult::Confirmed { image, rect } => {
             let (copied, path) = apply_outputs(&image, config)?;
@@ -562,6 +572,7 @@ impl App {
             return;
         }
         let data = lparam.0 as *const COPYDATASTRUCT;
+        // 指针由发送方在同步 SendMessageW 期间保证有效，仅在本消息处理内读取。
         let (magic, length, pointer) = unsafe {
             (
                 (*data).dwData,
@@ -699,6 +710,7 @@ impl App {
 /// 注册截图/退出热键，失败时按候选列表退避。
 unsafe fn register_hotkeys(hwnd: HWND, config: &Config) -> (Option<Hotkey>, Option<Hotkey>) {
     unsafe {
+        // 步骤 1：截图热键优先用配置值，失败则依次退避候选。
         let mut capture = None;
         for text in [
             config.hotkey.capture.as_str(),
@@ -726,6 +738,7 @@ unsafe fn register_hotkeys(hwnd: HWND, config: &Config) -> (Option<Hotkey>, Opti
             return (None, None);
         };
 
+        // 步骤 2：退出热键避开与截图热键冲突。
         let same_modifiers = Hotkey {
             modifiers: capture.modifiers,
             virtual_key: VK_Q.0 as u32,
@@ -764,6 +777,7 @@ unsafe fn register_hotkeys(hwnd: HWND, config: &Config) -> (Option<Hotkey>, Opti
 }
 
 unsafe fn state(hwnd: HWND) -> Option<&'static mut App> {
+    // SAFETY: 窗口存活期间 GWLP_USERDATA 由本模块写入，仅在消息处理内使用。
     unsafe {
         let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
         if pointer.is_null() {
@@ -782,6 +796,7 @@ unsafe extern "system" fn hotkey_wndproc(
 ) -> LRESULT {
     unsafe {
         match message {
+            // 步骤 1：处理创建期消息。
             WM_NCCREATE => {
                 let create = lparam.0 as *const CREATESTRUCTW;
                 if !create.is_null() {
@@ -792,6 +807,7 @@ unsafe extern "system" fn hotkey_wndproc(
                 }
                 DefWindowProcW(hwnd, message, wparam, lparam)
             }
+            // 步骤 2：处理热键、托盘与激活消息。
             WM_HOTKEY => {
                 if let Some(app) = state(hwnd) {
                     match wparam.0 as i32 {
@@ -819,6 +835,7 @@ unsafe extern "system" fn hotkey_wndproc(
                 }
                 LRESULT(0)
             }
+            // 步骤 3：执行延迟截图计时器。
             WM_TIMER => {
                 if wparam.0 == TIMER_DELAY
                     && let Some(app) = state(hwnd)
@@ -829,6 +846,7 @@ unsafe extern "system" fn hotkey_wndproc(
                 }
                 LRESULT(0)
             }
+            // 步骤 4：接收转发命令，并在销毁前清理托盘。
             WM_COPYDATA => {
                 if let Some(app) = state(hwnd) {
                     app.on_copy_data(lparam);
@@ -836,7 +854,7 @@ unsafe extern "system" fn hotkey_wndproc(
                 LRESULT(1)
             }
             WM_DESTROY => {
-                // 先移除托盘图标，再退出消息循环。
+                // 先释放托盘图标，避免退出后残留。
                 if let Some(app) = state(hwnd) {
                     app.tray = None;
                 }

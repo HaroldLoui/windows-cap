@@ -1,3 +1,5 @@
+//! 应用编排：命令分发、无 UI 采集、自检与泄漏测试。
+
 pub mod autostart;
 pub mod cli;
 pub mod config;
@@ -15,6 +17,7 @@ use crate::spike;
 use crate::util::error::{AppError, Result};
 use crate::util::resources::process_resources;
 
+/// 解析命令行并执行对应子命令。
 pub fn run() -> Result<()> {
     let parsed = cli::parse();
     crate::util::log::init(parsed.verbose)?;
@@ -31,7 +34,9 @@ pub fn run() -> Result<()> {
     }
 }
 
+/// 无 UI 采集一次并按选项输出。
 pub(crate) fn capture_command(options: cli::CaptureOptions) -> Result<()> {
+    // 步骤 1：按需延迟，并确定采集区域。
     if options.delay_ms > 0 {
         println!("{} ms 后采集…", options.delay_ms);
         std::thread::sleep(Duration::from_millis(options.delay_ms));
@@ -54,6 +59,7 @@ pub(crate) fn capture_command(options: cli::CaptureOptions) -> Result<()> {
             .unwrap_or_else(|| RectI::new(screen.x, screen.y, screen.width, screen.height))
     };
 
+    // 步骤 2：校验区域后采集一帧。
     if !screen.contains(rect) {
         return Err(AppError::msg(format!(
             "区域 {rect} 超出虚拟桌面 {}x{} @ ({}, {})",
@@ -73,6 +79,7 @@ pub(crate) fn capture_command(options: cli::CaptureOptions) -> Result<()> {
     let frame = backend.capture(area)?;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
 
+    // 步骤 3：保存、复制并按格式输出结果。
     let mut output_path: Option<PathBuf> = None;
     if let Some(path) = &options.output {
         files::save_png(&frame, path)?;
@@ -123,6 +130,7 @@ pub(crate) fn capture_command(options: cli::CaptureOptions) -> Result<()> {
         }
     }
 
+    // 步骤 4：记录本次选区，供 --last 使用。
     record_last_region(&options, rect);
 
     Ok(())
@@ -149,7 +157,7 @@ fn soak(iterations: u32) -> Result<()> {
 
     let mut backend = GdiBackend;
 
-    // 先预热，让分配器达到稳态（每帧约 14.7MB），否则会把"分配器保留"误判为泄漏。
+    // 预热到分配器稳态（每帧约 14.7MB），避免把保留内存误判为泄漏。
     let warmup = 10.min(iterations);
     for _ in 0..warmup {
         backend.capture(screen)?;
@@ -202,7 +210,7 @@ fn selftest() -> Result<()> {
     ::log::info!("window-cap {version} selftest");
     println!("window-cap {version} selftest");
 
-    // [1] 环境
+    // 步骤 1：检查虚拟桌面与显示器。
     let screen = VirtualScreen::current();
     println!(
         "[1/6] 虚拟桌面: {}x{} @ ({}, {})",
@@ -232,7 +240,7 @@ fn selftest() -> Result<()> {
         return Err(AppError::msg("虚拟桌面尺寸无效"));
     }
 
-    // [2] 整屏采集
+    // 步骤 2：整屏采集并校验尺寸。
     let mut backend = GdiBackend;
     let started = Instant::now();
     let full = backend.capture(screen)?;
@@ -256,7 +264,7 @@ fn selftest() -> Result<()> {
     }
     files::save_png(&full, Path::new("target/selftest/full.png"))?;
 
-    // [3]-[5] 测试图案：颜色、坐标一致性、剪贴板
+    // 步骤 3：用测试图案校验四角色块。
     let mut probe_frame: Option<FrameSource> = None;
     if ratio >= 0.01 {
         match TestPattern::show() {
@@ -282,7 +290,7 @@ fn selftest() -> Result<()> {
                     }
                 }
 
-                // [4] 区域截图 == 整屏裁剪
+                // 步骤 4：区域截图应与整屏裁剪逐像素一致。
                 let region_frame = backend.capture(VirtualScreen {
                     x: rect.x,
                     y: rect.y,
@@ -310,7 +318,7 @@ fn selftest() -> Result<()> {
         }
     }
 
-    // [5] 剪贴板 CF_DIB
+    // 步骤 5：校验剪贴板 CF_DIB。
     match &probe_frame {
         Some(probe) => {
             clipboard::put(&probe.frame)?;
@@ -339,7 +347,7 @@ fn selftest() -> Result<()> {
         }
     }
 
-    // [6] 落盘与 Unicode 路径
+    // 步骤 6：校验 Unicode 路径落盘。
     let unicode_path = Path::new("target/selftest/中文路径 测试.png");
     files::save_png(&full, unicode_path)?;
     if unicode_path.exists() {
@@ -348,7 +356,7 @@ fn selftest() -> Result<()> {
         failures.push("Unicode 路径落盘失败".to_string());
     }
 
-    // 汇总
+    // 步骤 7：汇总结果。
     if failures.is_empty() {
         println!("自检通过");
         ::log::info!("selftest ok");

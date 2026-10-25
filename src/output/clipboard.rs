@@ -16,6 +16,7 @@ use crate::util::error::{AppError, Result};
 
 /// Windows 标准剪贴板格式 `CF_DIB`（值为 8）。
 const CF_DIB: u32 = 8;
+/// `BITMAPINFOHEADER` 的字节数。
 const DIB_HEADER_BYTES: usize = 40;
 
 /// 把画面以 `CF_DIB` 放入剪贴板。
@@ -23,6 +24,7 @@ pub fn put(frame: &Frame) -> Result<()> {
     let dib = encode_dib(frame);
     let mut last_error: Option<windows::core::Error> = None;
 
+    // 剪贴板可能被其他程序短暂占用，最多重试 3 次。
     for attempt in 0..3 {
         match unsafe { OpenClipboard(None) } {
             Ok(()) => {
@@ -39,6 +41,7 @@ pub fn put(frame: &Frame) -> Result<()> {
                         ptr::copy_nonoverlapping(dib.as_ptr(), pointer as *mut u8, dib.len());
                         let _ = GlobalUnlock(hglobal);
 
+                        // 设置成功后所有权归系统；失败路径自行 GlobalFree。
                         match SetClipboardData(CF_DIB, Some(HANDLE(hglobal.0))) {
                             Ok(_) => Ok(()),
                             Err(error) => {
@@ -85,12 +88,13 @@ pub fn probe_dib() -> Result<Option<usize>> {
     }
 }
 
-/// `BITMAPINFOHEADER` + 自底向上 BGRA（32bpp，alpha=255）。
+/// 编码为 `BITMAPINFOHEADER` + 自底向上 BGRA（32bpp，alpha=255）。
 fn encode_dib(frame: &Frame) -> Vec<u8> {
     let row_bytes = frame.width as usize * 4;
     let pixel_bytes = row_bytes * frame.height as usize;
     let mut out = vec![0u8; DIB_HEADER_BYTES + pixel_bytes];
 
+    // 头部字段均为小端。
     out[0..4].copy_from_slice(&(DIB_HEADER_BYTES as u32).to_le_bytes());
     out[4..8].copy_from_slice(&(frame.width as i32).to_le_bytes());
     out[8..12].copy_from_slice(&(frame.height as i32).to_le_bytes());

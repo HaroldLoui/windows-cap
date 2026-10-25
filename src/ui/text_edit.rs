@@ -1,8 +1,4 @@
-//! 文字标注输入：一个位于遮罩上的 `EDIT` 子窗口。
-//!
-//! 背景透明方式：子类化 EDIT，在 `WM_ERASEBKGND` 里把遮罩合成缓冲中
-//! 该位置的像素原位 BitBlt 进来，文字由系统 EDIT 以透明背景绘制。
-//! 这样既保留原生输入/中文 IME，又不会出现不透明输入框。
+//! 遮罩上的文字标注输入框：透明背景的 `EDIT` 子窗口，保留原生输入与中文 IME。
 
 use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
 
@@ -30,17 +26,23 @@ use crate::capture::RectI;
 use crate::platform::dib::Dib;
 use crate::util::error::Result;
 
+/// 请求提交文字（EDIT 发往遮罩）。
 pub const WM_TEXT_COMMIT: u32 = WM_APP + 2;
+/// 请求取消文字输入（EDIT 发往遮罩）。
 pub const WM_TEXT_CANCEL: u32 = WM_APP + 3;
 
+// 子类化过程无实例上下文，背景 DC 与偏移通过全局原子变量传递。
+// 该 DC 属于遮罩合成缓冲，仅在输入框存活期间有效。
 static OLD_PROC: AtomicIsize = AtomicIsize::new(0);
 static BACKGROUND_DC: AtomicIsize = AtomicIsize::new(0);
 static BACKGROUND_X: AtomicI32 = AtomicI32::new(0);
 static BACKGROUND_Y: AtomicI32 = AtomicI32::new(0);
 
+/// 遮罩上的文字输入框，Drop 时回收窗口、IME 与字体。
 pub struct TextEditor {
+    /// EDIT 子窗口句柄。
     pub hwnd: HWND,
-    /// 文字锚点（document 本地坐标）。
+    /// 文字锚点（文档局部坐标）。
     pub doc_position: (i32, i32),
     position: (i32, i32),
     size: (i32, i32),
@@ -49,7 +51,7 @@ pub struct TextEditor {
 }
 
 impl TextEditor {
-    /// 在遮罩客户端坐标 `client_position` 处创建输入框，背景取自 `background` 的对应区域。
+    /// 在遮罩客户区创建透明文字输入框，背景取自已合成画面。
     pub fn open(
         parent: HWND,
         client_position: (i32, i32),
@@ -58,12 +60,14 @@ impl TextEditor {
         font_size: f32,
         background: &Dib,
     ) -> Result<Self> {
+        // 步骤 1：按 DPI 计算输入框尺寸与字体高度。
         let scale = scale.max(1.0);
         let width = ((320.0 * scale).round() as i32).max(160);
         let height = ((font_size * 1.7 * 3.0).round() as i32).max(64);
         let font_height = -((font_size).round() as i32).max(10);
 
         unsafe {
+            // 步骤 2：创建 EDIT，并记录透明背景的来源与偏移。
             let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
             let edit = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -80,10 +84,12 @@ impl TextEditor {
                 None,
             )?;
 
+            // 背景 DC 由遮罩合成缓冲持有，仅在输入框存活期间有效。
             BACKGROUND_DC.store(background.dc.0 as isize, Ordering::SeqCst);
             BACKGROUND_X.store(client_position.0, Ordering::SeqCst);
             BACKGROUND_Y.store(client_position.1, Ordering::SeqCst);
 
+            // 步骤 3：应用字体，并把 EDIT 的窗口过程子类化。
             let font = CreateFontW(
                 font_height,
                 0,
@@ -113,7 +119,7 @@ impl TextEditor {
                 SetWindowLongPtrW(edit, GWLP_WNDPROC, edit_wndproc as *const () as isize);
             OLD_PROC.store(previous, Ordering::SeqCst);
 
-            // 遮罩本身禁用了 IME，这里给输入框单独建一个上下文。
+            // 步骤 4：遮罩已禁用 IME，这里给 EDIT 单独建上下文并取得焦点。
             let ime_context = ImmCreateContext();
             if !ime_context.0.is_null() {
                 let _ = ImmAssociateContext(edit, ime_context);
@@ -131,6 +137,7 @@ impl TextEditor {
         }
     }
 
+    /// 读取输入框中的文本。
     pub fn text(&self) -> String {
         unsafe {
             let length = GetWindowTextLengthW(self.hwnd);
@@ -143,19 +150,22 @@ impl TextEditor {
         }
     }
 
+    /// 当前输入框位置（遮罩客户区）。
     pub fn position(&self) -> (i32, i32) {
         self.position
     }
 
+    /// 输入框在遮罩客户区中的矩形。
     pub fn client_rect(&self) -> RectI {
         RectI::new(self.position.0, self.position.1, self.size.0, self.size.1)
     }
 
+    /// 输入框当前尺寸。
     pub fn size(&self) -> (i32, i32) {
         self.size
     }
 
-    /// 移动输入框；文字锚点同步平移。
+    /// 移动输入框，并同步平移文字锚点。
     pub fn move_to(&mut self, position: (i32, i32)) {
         let dx = position.0 - self.position.0;
         let dy = position.1 - self.position.1;
@@ -201,6 +211,7 @@ impl TextEditor {
 
 impl Drop for TextEditor {
     fn drop(&mut self) {
+        // 释放顺序：解除 IME -> 销毁窗口 -> 销毁 IME 上下文与字体 -> 清空背景 DC。
         unsafe {
             let _ = ImmAssociateContext(self.hwnd, HIMC(std::ptr::null_mut()));
             let _ = DestroyWindow(self.hwnd);
@@ -215,6 +226,7 @@ impl Drop for TextEditor {
     }
 }
 
+/// EDIT 子类化窗口过程：透明背景、提交/取消快捷键与消息转发。
 unsafe extern "system" fn edit_wndproc(
     hwnd: HWND,
     message: u32,
@@ -224,10 +236,10 @@ unsafe extern "system" fn edit_wndproc(
     unsafe {
         match message {
             WM_ERASEBKGND => {
+                // 步骤 1：只重绘失效区；整块重绘会擦掉 EDIT 已有文字。
                 let background = HDC(BACKGROUND_DC.load(Ordering::SeqCst) as *mut _);
                 if !background.0.is_null() {
                     let hdc = HDC(wparam.0 as *mut _);
-                    // 只重绘失效区域；整块重绘会把编辑框里已有的文字擦掉。
                     let mut clip = RECT::default();
                     if GetClipBox(hdc, &mut clip).0 > 1 {
                         let width = clip.right - clip.left;
@@ -247,9 +259,11 @@ unsafe extern "system" fn edit_wndproc(
                         }
                     }
                 }
+                // 返回 1 表示已处理，阻止 EDIT 默认擦除背景。
                 return LRESULT(1);
             }
             WM_KEYDOWN => {
+                // 步骤 2：回车提交，Shift+回车换行，Esc 取消。
                 let key = wparam.0 as u16;
                 let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
                 if key == VK_RETURN.0 && !shift {
@@ -268,6 +282,7 @@ unsafe extern "system" fn edit_wndproc(
             _ => {}
         }
 
+        // 步骤 3：其余消息交回子类化前的窗口过程。
         let previous: WNDPROC = std::mem::transmute(OLD_PROC.load(Ordering::SeqCst));
         CallWindowProcW(previous, hwnd, message, wparam, lparam)
     }

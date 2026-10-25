@@ -1,10 +1,8 @@
-//! 选区状态机：与窗口/绘制解耦，便于单元测试。
-//!
-//! 坐标一律是**屏幕坐标**（虚拟桌面物理像素）。
+//! 选区状态机：坐标使用虚拟桌面物理像素，与窗口和绘制解耦。
 
 use crate::capture::{RectI, VirtualScreen};
 
-/// 8 个缩放手柄。
+/// 选区八个方向的缩放手柄。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handle {
     NorthWest,
@@ -29,7 +27,7 @@ impl Handle {
         Handle::West,
     ];
 
-    /// 手柄在选区矩形上的位置。
+    /// 返回手柄在选区上的坐标。
     pub fn position(self, rect: RectI) -> (i32, i32) {
         let left = rect.x;
         let center_x = rect.x + rect.width / 2;
@@ -50,21 +48,22 @@ impl Handle {
     }
 }
 
-/// 一次鼠标抬起后的结果。
+/// 一次鼠标交互结束后的结果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndResult {
-    /// 新建了选区。
+    /// 新选区已提交。
     Selected,
-    /// 移动/缩放了已有选区。
+    /// 已有选区已移动或缩放。
     Adjusted,
-    /// 点在选区外但没有拖动：恢复原选区。
+    /// 点在选区外且未拖动，恢复原选区。
     Restored,
-    /// 没有选区且只是单击：应当取消整个遮罩。
+    /// 无选区且单击，应取消遮罩。
     Cancelled,
     /// 没有发生交互。
     Idle,
 }
 
+/// 当前拖拽模式。
 #[derive(Clone, Copy, Debug, Default)]
 enum Mode {
     #[default]
@@ -88,6 +87,7 @@ const HANDLE_TOLERANCE: i32 = 6;
 pub const HANDLE_HIT_TOLERANCE: i32 = HANDLE_TOLERANCE;
 const MIN_SIZE: i32 = 3;
 
+/// 选区交互状态。
 #[derive(Default)]
 pub struct SelectionState {
     rect: Option<RectI>,
@@ -96,27 +96,29 @@ pub struct SelectionState {
 }
 
 impl SelectionState {
+    /// 创建空的选区状态。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 用于脚本化测试：直接设置一个选区。
+    /// 直接设置一个选区（测试用）。
     pub fn set_selection(&mut self, rect: RectI) {
         self.rect = Some(rect);
         self.previous = None;
         self.mode = Mode::Idle;
     }
 
+    /// 返回当前选区。
     pub fn rect(&self) -> Option<RectI> {
         self.current_rect()
     }
 
-    /// 是否有正在进行的拖拽（创建/移动/缩放）。
+    /// 是否有正在进行的拖拽。
     pub fn is_active(&self) -> bool {
         !matches!(self.mode, Mode::Idle)
     }
 
-    /// 正在拖拽的手柄（缩放中）。
+    /// 返回正在缩放的手柄。
     pub fn active_handle(&self) -> Option<Handle> {
         match self.mode {
             Mode::Resizing { handle, .. } => Some(handle),
@@ -129,7 +131,7 @@ impl SelectionState {
         matches!(self.mode, Mode::Moving { .. })
     }
 
-    /// 正在绘制/生效的选区（创建过程中返回实时矩形）。
+    /// 返回正在生效的选区；创建过程中返回实时矩形。
     pub fn current_rect(&self) -> Option<RectI> {
         match self.mode {
             Mode::Creating { anchor, cursor } => Some(normalized(anchor, cursor)),
@@ -137,6 +139,7 @@ impl SelectionState {
         }
     }
 
+    /// 开始创建、移动或缩放选区。
     pub fn begin(&mut self, x: i32, y: i32, bounds: VirtualScreen) {
         let point = clamp_point(x, y, bounds);
 
@@ -158,7 +161,7 @@ impl SelectionState {
             }
         }
 
-        // 在空白处按下：开始新选区（先保留旧选区，单击未拖动时恢复）。
+        // 先保留旧选区，单击未拖动时恢复。
         self.previous = self.rect.take();
         self.mode = Mode::Creating {
             anchor: point,
@@ -166,6 +169,7 @@ impl SelectionState {
         };
     }
 
+    /// 更新拖拽中的选区。
     pub fn update(&mut self, x: i32, y: i32, bounds: VirtualScreen) {
         let point = clamp_point(x, y, bounds);
         match self.mode {
@@ -200,6 +204,7 @@ impl SelectionState {
         }
     }
 
+    /// 结束拖拽并提交或回退选区。
     pub fn end(&mut self, _bounds: VirtualScreen) -> EndResult {
         let mode = std::mem::replace(&mut self.mode, Mode::Idle);
         match mode {
@@ -226,12 +231,14 @@ impl SelectionState {
         }
     }
 
+    /// 按增量移动当前选区。
     pub fn move_by(&mut self, dx: i32, dy: i32, bounds: VirtualScreen) {
         if let Some(rect) = self.rect {
             self.rect = Some(move_rect(rect, dx, dy, bounds));
         }
     }
 
+    /// 按增量调整当前选区大小。
     pub fn resize_by(&mut self, dx: i32, dy: i32, bounds: VirtualScreen) {
         if let Some(rect) = self.rect {
             let max_width = bounds.right() - rect.x;
@@ -242,6 +249,7 @@ impl SelectionState {
         }
     }
 
+    /// 返回命中容差内的缩放手柄。
     pub fn handle_at(rect: RectI, x: i32, y: i32, tolerance: i32) -> Option<Handle> {
         Handle::ALL.into_iter().find(|handle| {
             let (handle_x, handle_y) = handle.position(rect);
@@ -250,6 +258,7 @@ impl SelectionState {
     }
 }
 
+/// 将坐标限制在虚拟屏幕内。
 fn clamp_point(x: i32, y: i32, bounds: VirtualScreen) -> (i32, i32) {
     (
         x.clamp(bounds.x, bounds.right() - 1),
@@ -257,16 +266,19 @@ fn clamp_point(x: i32, y: i32, bounds: VirtualScreen) -> (i32, i32) {
     )
 }
 
+/// 由两个对角点构造规范化矩形。
 fn normalized(a: (i32, i32), b: (i32, i32)) -> RectI {
     let left = a.0.min(b.0);
     let top = a.1.min(b.1);
     RectI::new(left, top, (a.0 - b.0).abs(), (a.1 - b.1).abs())
 }
 
+/// 判断点是否位于矩形内。
 fn contains(rect: RectI, x: i32, y: i32) -> bool {
     x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height
 }
 
+/// 移动矩形并限制在屏幕内。
 fn move_rect(origin: RectI, dx: i32, dy: i32, bounds: VirtualScreen) -> RectI {
     let max_x = bounds.right() - origin.width;
     let max_y = bounds.bottom() - origin.height;
@@ -275,6 +287,7 @@ fn move_rect(origin: RectI, dx: i32, dy: i32, bounds: VirtualScreen) -> RectI {
     RectI::new(x, y, origin.width, origin.height)
 }
 
+/// 按手柄方向调整矩形并限制在屏幕内。
 fn resize_rect(origin: RectI, handle: Handle, dx: i32, dy: i32, bounds: VirtualScreen) -> RectI {
     let mut left = origin.x;
     let mut top = origin.y;
