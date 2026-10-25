@@ -516,7 +516,9 @@ impl App {
         match capture_flow(None, &self.config, true) {
             Ok(Some(outcome)) => {
                 self.remember_region(outcome.rect);
-                self.notify(&outcome.message(), false);
+                if !outcome.pinned {
+                    self.notify(&outcome.message(), false);
+                }
             }
             Ok(None) => {
                 ::log::info!("capture cancelled by user");
@@ -544,7 +546,9 @@ impl App {
         match capture_region(rect, &self.config) {
             Ok(outcome) => {
                 self.remember_region(outcome.rect);
-                self.notify(&outcome.message(), false);
+                if !outcome.pinned {
+                    self.notify(&outcome.message(), false);
+                }
             }
             Err(error) => {
                 ::log::error!("last region capture failed: {error}");
