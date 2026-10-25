@@ -26,6 +26,11 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 
 ## 快速开始
 
+### 下载
+
+- GitHub Releases：<https://github.com/HaroldLoui/windows-cap/releases>
+- 当前 Beta：`v0.10.0-beta.6` 便携 zip，解压后运行 `window-cap.exe`。
+
 ### 从源码构建
 
 需要 Rust 1.85+（edition 2024）：
