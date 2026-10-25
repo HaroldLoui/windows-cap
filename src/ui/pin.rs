@@ -11,8 +11,8 @@ use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint,
     CreateCompatibleDC, CreateDIBSection, CreateSolidBrush, DEFAULT_GUI_FONT, DIB_RGB_COLORS,
     DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject,
-    DrawTextW, EndPaint, FillRect, GetDC, GetStockObject, HGDIOBJ, PAINTSTRUCT, ReleaseDC,
-    SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    DrawTextW, EndPaint, FillRect, GetDC, GetStockObject, HGDIOBJ, InvalidateRect, PAINTSTRUCT,
+    ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -21,13 +21,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DestroyWindow, GWLP_USERDATA, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-    IsWindow, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TPM_TOPALIGN, TrackPopupMenu, ULW_ALPHA, UpdateLayeredWindow, WM_DESTROY, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCCREATE, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    GetWindowTextW, IsWindow, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenu, ULW_ALPHA,
+    UpdateLayeredWindow, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NULL, WM_PAINT, WM_RBUTTONUP,
+    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
@@ -37,10 +38,13 @@ use crate::util::error::Result;
 
 const PIN_CLASS: PCWSTR = w!("window_cap_pin");
 const HINT_CLASS: PCWSTR = w!("window_cap_pin_hint");
+const ZOOM_CLASS: PCWSTR = w!("window_cap_pin_zoom");
 const SHADOW: i32 = 18;
 const MIN_SIZE: i32 = 40;
 const MAX_SIZE: i32 = 8000;
 const HINT_TIMER: usize = 1;
+const ZOOM_TIMER: usize = 1;
+const ZOOM_HIDE_MS: u32 = 900;
 const HINT_TEXT: &str = "已贴图 · 拖动移动 · Ctrl+滚轮缩放 · Esc/双击关闭";
 
 struct DragState {
@@ -52,6 +56,7 @@ struct PinState {
     image: Frame,
     drag: Option<DragState>,
     hint: HWND,
+    zoom: HWND,
 }
 
 /// 创建一个贴图窗口（不阻塞，常驻消息循环继续处理）。
@@ -60,11 +65,13 @@ pub fn show(image: Frame) -> Result<()> {
         let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
         register_class(hinstance, PIN_CLASS, pin_wndproc);
         register_class(hinstance, HINT_CLASS, hint_wndproc);
+        register_class(hinstance, ZOOM_CLASS, zoom_wndproc);
 
         let raw_state = Box::into_raw(Box::new(PinState {
             image,
             drag: None,
             hint: HWND(null_mut()),
+            zoom: HWND(null_mut()),
         }));
         let width = (*raw_state).image.width as i32;
         let height = (*raw_state).image.height as i32;
@@ -393,6 +400,9 @@ unsafe extern "system" fn pin_wndproc(
                             SWP_NOZORDER | SWP_NOACTIVATE,
                         );
                         update_layer(hwnd);
+                        let percent = ((new_content_w as f32 / pin.image.width as f32) * 100.0)
+                            .round() as i32;
+                        show_zoom(hwnd, percent);
                     }
                 }
                 LRESULT(0)
@@ -422,8 +432,135 @@ unsafe extern "system" fn pin_wndproc(
                     if IsWindow(Some(state.hint)).as_bool() {
                         let _ = DestroyWindow(state.hint);
                     }
+                    if IsWindow(Some(state.zoom)).as_bool() {
+                        let _ = DestroyWindow(state.zoom);
+                    }
                     drop(state);
                 }
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, message, wparam, lparam),
+        }
+    }
+}
+
+/// 在贴图上方显示缩放百分比，短暂无操作后自动消失。
+unsafe fn show_zoom(pin: HWND, percent: i32) {
+    unsafe {
+        let Some(pin_state) = state(pin) else {
+            return;
+        };
+        let mut rect = RECT::default();
+        if GetWindowRect(pin, &mut rect).is_err() {
+            return;
+        }
+        let content_width = (rect.right - rect.left - SHADOW * 2).max(1);
+        let width = 78;
+        let height = 30;
+        let x = rect.left + SHADOW + (content_width - width) / 2;
+        let mut y = rect.top + SHADOW - height - 8;
+        if y < 8 {
+            y = rect.top + SHADOW + 8;
+        }
+        let text = format!("{percent}%");
+        let wide_text = wide(&text);
+        ::log::debug!(
+            "show_zoom percent={percent} anchor=({x},{y}) existing={}",
+            IsWindow(Some(pin_state.zoom)).as_bool()
+        );
+
+        if IsWindow(Some(pin_state.zoom)).as_bool() {
+            let _ = SetWindowTextW(pin_state.zoom, PCWSTR(wide_text.as_ptr()));
+            let _ = SetWindowPos(
+                pin_state.zoom,
+                None,
+                x,
+                y,
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            let _ = InvalidateRect(Some(pin_state.zoom), None, true);
+            SetTimer(Some(pin_state.zoom), ZOOM_TIMER, ZOOM_HIDE_MS, None);
+            return;
+        }
+
+        let Ok(hinstance) = GetModuleHandleW(None).map(|module| HINSTANCE(module.0)) else {
+            return;
+        };
+        let zoom = match CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            ZOOM_CLASS,
+            PCWSTR(wide_text.as_ptr()),
+            WS_POPUP | WS_VISIBLE,
+            x,
+            y,
+            width,
+            height,
+            None,
+            None,
+            Some(hinstance),
+            None,
+        ) {
+            Ok(zoom) => zoom,
+            Err(error) => {
+                ::log::warn!("zoom window create failed: {error}");
+                return;
+            }
+        };
+        let _ = ShowWindow(zoom, SW_SHOWNOACTIVATE);
+        SetTimer(Some(zoom), ZOOM_TIMER, ZOOM_HIDE_MS, None);
+        pin_state.zoom = zoom;
+        ::log::debug!("zoom window created: {zoom:?}");
+    }
+}
+
+unsafe extern "system" fn zoom_wndproc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        match message {
+            WM_ERASEBKGND => LRESULT(1),
+            WM_PAINT => {
+                let mut paint = PAINTSTRUCT::default();
+                let hdc = BeginPaint(hwnd, &mut paint);
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                let background = CreateSolidBrush(COLORREF(0x0020_2020));
+                FillRect(hdc, &rect, background);
+                let _ = DeleteObject(HGDIOBJ(background.0));
+                let border = CreateSolidBrush(COLORREF(0x0080_8080));
+                let _ = windows::Win32::Graphics::Gdi::FrameRect(hdc, &rect, border);
+                let _ = DeleteObject(HGDIOBJ(border.0));
+
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, COLORREF(0x00FF_FFFF));
+                let old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
+                let mut buffer = [0u16; 32];
+                let length = GetWindowTextW(hwnd, &mut buffer);
+                let text = String::from_utf16_lossy(&buffer[..length.max(0) as usize]);
+                let mut wide_text = wide(&text);
+                DrawTextW(
+                    hdc,
+                    &mut wide_text,
+                    &mut rect,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+                SelectObject(hdc, old_font);
+                let _ = EndPaint(hwnd, &paint);
+                LRESULT(0)
+            }
+            WM_TIMER => {
+                if wparam.0 == ZOOM_TIMER {
+                    let _ = DestroyWindow(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN => {
+                let _ = DestroyWindow(hwnd);
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, message, wparam, lparam),
