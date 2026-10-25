@@ -4,7 +4,7 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 
 仓库：<https://github.com/HaroldLoui/windows-cap>
 
-当前版本：**0.10.0-beta.5**（Beta）。支持 Windows 10/11，单显示器 100% DPI 已验证；4K/多屏/混合 DPI 仍在兼容性测试中。
+当前版本：**0.10.0-beta.6**（Beta）。支持 Windows 10/11，单显示器 100% DPI 已验证；4K/多屏/混合 DPI 仍在兼容性测试中。
 
 ![工具栏](docs/images/toolbar.png)
 
@@ -63,7 +63,7 @@ powershell -NoProfile -File scripts\package.ps1
 
 ### 命令行
 
-Release 版本为无控制台 GUI 程序，CLI 输出写入 `%LOCALAPPDATA%\window-cap\logs\cli.log`；开发构建（`cargo run`）仍在控制台输出。
+Release 版本为无控制台 GUI 程序，CLI 输出写入日志：`app.log` 全量、`app-warn.log` 警告及以上、`app-error.log` 错误；日志按天归档，最多保留 3 天。开发构建（`cargo run`）同时输出到控制台。
 
 ```powershell
 window-cap.exe                 # 常驻
@@ -73,7 +73,7 @@ window-cap.exe --capture --last --output shot.png
 window-cap.exe --selftest      # 环境/采集/剪贴板/落盘自检
 ```
 
-完整参数：`window-cap.exe --help`（输出同样写入 `cli.log`）。
+完整参数：`window-cap.exe --help`（输出同样写入 `app.log`）。日志目录：`%LOCALAPPDATA%\window-cap\logs`。
 
 ## 配置
 

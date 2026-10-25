@@ -272,6 +272,7 @@
 | 2026-10-25 | Pin 图标居中 | `v0.10.0-beta3` | `467860c` | 按各图标包围盒修正绘制偏移，按钮内居中 |
 | 2026-10-25 | 文档/注释/发布 | `v0.10.0-beta4` | `0098e22` | 全量注释整理、开发文档、README/LICENSE、推送 GitHub |
 | 2026-10-25 | 无控制台/CLI 日志 | `v0.10.0-beta5` | `6359e40` | release 改 GUI 子系统，stdout/stderr 写入 logs/cli.log |
+| 2026-10-25 | 统一日志系统 | `v0.10.0-beta6` | 本次提交 | app/app-warn/app-error 分级日志，按天归档保留 3 天，println→log |
 
 ## 后续（P6 / 收尾）
 

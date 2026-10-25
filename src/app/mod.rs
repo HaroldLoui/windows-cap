@@ -19,8 +19,11 @@ use crate::util::resources::process_resources;
 
 /// 解析命令行并执行对应子命令。
 pub fn run() -> Result<()> {
+    crate::util::log::init()?;
     let parsed = cli::parse();
-    crate::util::log::init(parsed.verbose)?;
+    if parsed.verbose {
+        log::set_max_level(log::LevelFilter::Debug);
+    }
 
     match parsed.command {
         cli::Command::Resident { config } => hotkey::run_resident(config),
@@ -38,7 +41,7 @@ pub fn run() -> Result<()> {
 pub(crate) fn capture_command(options: cli::CaptureOptions) -> Result<()> {
     // 步骤 1：按需延迟，并确定采集区域。
     if options.delay_ms > 0 {
-        println!("{} ms 后采集…", options.delay_ms);
+        log::info!("{} ms 后采集…", options.delay_ms);
         std::thread::sleep(Duration::from_millis(options.delay_ms));
     }
 
@@ -47,7 +50,7 @@ pub(crate) fn capture_command(options: cli::CaptureOptions) -> Result<()> {
         let path = config::Config::path(options.config.as_deref());
         let (config, warning) = config::Config::load_or_create(&path);
         if let Some(warning) = warning {
-            eprintln!("配置: {warning}");
+            log::warn!("配置: {warning}");
         }
         config
             .capture
@@ -98,7 +101,7 @@ pub(crate) fn capture_command(options: cli::CaptureOptions) -> Result<()> {
             Some(path) => format!("\"{}\"", json_escape(&path.display().to_string())),
             None => "null".to_string(),
         };
-        println!(
+        log::info!(
             "{{\"width\":{},\"height\":{},\"x\":{},\"y\":{},\"backend\":\"{}\",\"elapsed_ms\":{:.2},\"output\":{},\"clipboard\":{}}}",
             frame.width,
             frame.height,
@@ -110,7 +113,7 @@ pub(crate) fn capture_command(options: cli::CaptureOptions) -> Result<()> {
             clipboard_ok
         );
     } else {
-        println!(
+        log::info!(
             "截取: {}x{} @ ({}, {}) backend={}",
             frame.width,
             frame.height,
@@ -118,15 +121,15 @@ pub(crate) fn capture_command(options: cli::CaptureOptions) -> Result<()> {
             frame.origin.1,
             backend.name()
         );
-        println!("耗时: {:.1} ms", elapsed_ms);
+        log::info!("耗时: {:.1} ms", elapsed_ms);
         if let Some(path) = &output_path {
-            println!("已保存: {}", path.display());
+            log::info!("已保存: {}", path.display());
         }
         if clipboard_ok {
-            println!("已复制到剪贴板 (CF_DIB, {} 字节)", 40 + frame.bgra.len());
+            log::info!("已复制到剪贴板 (CF_DIB, {} 字节)", 40 + frame.bgra.len());
         }
         if output_path.is_none() && !clipboard_ok {
-            println!("提示: 未指定输出，可加 --output 或 --clipboard");
+            log::info!("提示: 未指定输出，可加 --output 或 --clipboard");
         }
     }
 
@@ -164,7 +167,7 @@ fn soak(iterations: u32) -> Result<()> {
     }
 
     let (gdi_before, user_before, memory_before) = process_resources()?;
-    println!(
+    log::info!(
         "soak 开始: {iterations} 次（已预热 {warmup} 次），初始 GDI={gdi_before} USER={user_before} 内存={:.1} MB",
         memory_before as f64 / 1024.0 / 1024.0
     );
@@ -172,7 +175,7 @@ fn soak(iterations: u32) -> Result<()> {
     for index in 0..iterations {
         backend.capture(screen)?;
         if index % 10 == 0 || index + 1 == iterations {
-            println!("  进度: {}/{}", index + 1, iterations);
+            log::info!("  进度: {}/{}", index + 1, iterations);
         }
     }
 
@@ -181,7 +184,7 @@ fn soak(iterations: u32) -> Result<()> {
     let user_delta = user_after as i64 - user_before as i64;
     let memory_delta = memory_after as i64 - memory_before as i64;
 
-    println!(
+    log::info!(
         "soak 结束: GDI={gdi_after} ({gdi_delta:+}) USER={user_after} ({user_delta:+}) 内存={:.1} MB ({:+.1} MB)",
         memory_after as f64 / 1024.0 / 1024.0,
         memory_delta as f64 / 1024.0 / 1024.0
@@ -207,19 +210,21 @@ fn selftest() -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let mut failures: Vec<String> = Vec::new();
 
-    ::log::info!("window-cap {version} selftest");
-    println!("window-cap {version} selftest");
+    log::info!("window-cap {version} selftest");
 
     // 步骤 1：检查虚拟桌面与显示器。
     let screen = VirtualScreen::current();
-    println!(
+    log::info!(
         "[1/6] 虚拟桌面: {}x{} @ ({}, {})",
-        screen.width, screen.height, screen.x, screen.y
+        screen.width,
+        screen.height,
+        screen.x,
+        screen.y
     );
     let monitors = capture::monitors();
-    println!("      显示器数量: {}", monitors.len());
+    log::info!("      显示器数量: {}", monitors.len());
     for (index, monitor) in monitors.iter().enumerate() {
-        println!(
+        log::info!(
             "      #{} {} {}x{} @ ({}, {}) dpi={}x{} device={}",
             index,
             if monitor.primary {
@@ -246,7 +251,7 @@ fn selftest() -> Result<()> {
     let full = backend.capture(screen)?;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let ratio = full.non_black_ratio();
-    println!(
+    log::info!(
         "[2/6] 整屏采集: {}x{}，{:.1} ms，非黑像素 {:.1}%",
         full.width,
         full.height,
@@ -260,7 +265,7 @@ fn selftest() -> Result<()> {
         ));
     }
     if ratio < 0.01 {
-        println!("      警告: 画面几乎全黑（锁屏/无桌面/采集受限），跳过视觉校验");
+        log::info!("      警告: 画面几乎全黑（锁屏/无桌面/采集受限），跳过视觉校验");
     }
     files::save_png(&full, Path::new("target/selftest/full.png"))?;
 
@@ -270,7 +275,7 @@ fn selftest() -> Result<()> {
         match TestPattern::show() {
             Ok(pattern) => {
                 let rect = pattern.rect();
-                println!("[3/6] 测试图案窗口: {rect}");
+                log::info!("[3/6] 测试图案窗口: {rect}");
 
                 let with_pattern = backend.capture(screen)?;
                 for (name, expected, x_step, y_step) in [
@@ -299,7 +304,7 @@ fn selftest() -> Result<()> {
                 })?;
                 let cropped = with_pattern.crop(rect)?;
                 let diff = region_frame.pixel_diff_ratio(&cropped);
-                println!("[4/6] 区域截图 vs 整屏裁剪: 差异像素 {:.4}%", diff * 100.0);
+                log::info!("[4/6] 区域截图 vs 整屏裁剪: 差异像素 {:.4}%", diff * 100.0);
                 if diff > 0.001 {
                     failures.push(format!("区域截图与整屏裁剪不一致: diff={diff:.6}"));
                 }
@@ -326,7 +331,7 @@ fn selftest() -> Result<()> {
                 Some(size)
                     if size >= probe.expected_size && size <= probe.expected_size + 65536 =>
                 {
-                    println!(
+                    log::info!(
                         "[5/6] 剪贴板 CF_DIB: {size} 字节（期望 ≥ {}）",
                         probe.expected_size
                     );
@@ -341,7 +346,7 @@ fn selftest() -> Result<()> {
         None => {
             clipboard::put(&full)?;
             match clipboard::probe_dib()? {
-                Some(size) => println!("[5/6] 剪贴板 CF_DIB: {size} 字节（整屏）"),
+                Some(size) => log::info!("[5/6] 剪贴板 CF_DIB: {size} 字节（整屏）"),
                 None => failures.push("剪贴板中没有 CF_DIB".to_string()),
             }
         }
@@ -351,19 +356,19 @@ fn selftest() -> Result<()> {
     let unicode_path = Path::new("target/selftest/中文路径 测试.png");
     files::save_png(&full, unicode_path)?;
     if unicode_path.exists() {
-        println!("[6/6] Unicode 路径落盘: {}", unicode_path.display());
+        log::info!("[6/6] Unicode 路径落盘: {}", unicode_path.display());
     } else {
         failures.push("Unicode 路径落盘失败".to_string());
     }
 
     // 步骤 7：汇总结果。
     if failures.is_empty() {
-        println!("自检通过");
+        log::info!("自检通过");
         ::log::info!("selftest ok");
         Ok(())
     } else {
         for failure in &failures {
-            eprintln!("FAIL: {failure}");
+            log::error!("FAIL: {failure}");
         }
         ::log::error!("selftest failed: {} 项", failures.len());
         Err(AppError::msg(format!("自检失败: {} 项", failures.len())))

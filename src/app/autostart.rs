@@ -101,14 +101,14 @@ pub fn run(action: super::cli::AutoStartAction) -> Result<()> {
     match action {
         AutoStartAction::On => {
             set_enabled(true)?;
-            println!("开机自启: 已启用");
+            log::info!("开机自启: 已启用");
         }
         AutoStartAction::Off => {
             set_enabled(false)?;
-            println!("开机自启: 已关闭");
+            log::info!("开机自启: 已关闭");
         }
         AutoStartAction::Status => {
-            println!("开机自启: {}", describe());
+            log::info!("开机自启: {}", describe());
         }
     }
     Ok(())

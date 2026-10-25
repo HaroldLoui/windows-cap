@@ -124,20 +124,24 @@ pub struct CaptureOptions {
     pub config: Option<PathBuf>,
 }
 
-/// 解析命令行；`--help` / `--version` 由 clap 直接打印并退出。
+/// 解析命令行；`--help` / `--version` 写入日志后退出。
 pub fn parse() -> Parsed {
     let cli = match Cli::try_parse_from(std::env::args_os()) {
         Ok(cli) => cli,
         Err(error) => {
             let code = if error.use_stderr() { 2 } else { 0 };
-            print!("{error}");
+            if error.use_stderr() {
+                log::error!("{error}");
+            } else {
+                log::info!("{error}");
+            }
             std::process::exit(code);
         }
     };
 
     let verbose = cli.verbose;
     let command = cli.into_command().unwrap_or_else(|error| {
-        eprintln!("参数错误: {error}");
+        log::error!("参数错误: {error}");
         std::process::exit(2);
     });
     Parsed { verbose, command }

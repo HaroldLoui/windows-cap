@@ -371,14 +371,14 @@ mod tests {
     fn region_capture_equals_full_crop() {
         let screen = VirtualScreen::current();
         if screen.width <= 0 || screen.height <= 0 {
-            eprintln!("跳过：没有可用的桌面会话");
+            log::warn!("跳过：没有可用的桌面会话");
             return;
         }
 
         let pattern = match TestPattern::show() {
             Ok(pattern) => pattern,
             Err(error) => {
-                eprintln!("跳过：无法创建测试窗口: {error}");
+                log::warn!("跳过：无法创建测试窗口: {error}");
                 return;
             }
         };
@@ -387,13 +387,13 @@ mod tests {
         let full = match backend.capture(screen) {
             Ok(frame) => frame,
             Err(error) => {
-                eprintln!("跳过：采集失败: {error}");
+                log::warn!("跳过：采集失败: {error}");
                 pattern.close();
                 return;
             }
         };
         if full.non_black_ratio() < 0.01 {
-            eprintln!("跳过：采集画面几乎全黑");
+            log::warn!("跳过：采集画面几乎全黑");
             pattern.close();
             return;
         }

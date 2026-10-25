@@ -45,11 +45,11 @@ pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
     if single_instance.already_running() {
         let args: Vec<String> = std::env::args().skip(1).collect();
         if !args.is_empty() && single_instance::forward_to_existing(&args) {
-            println!("已转交给运行中的 window-cap");
+            log::info!("已转交给运行中的 window-cap");
         } else if single_instance::activate_existing() {
-            println!("window-cap 已在运行");
+            log::info!("window-cap 已在运行");
         } else {
-            eprintln!("window-cap 已在运行（未找到常驻窗口）");
+            log::warn!("window-cap 已在运行（未找到常驻窗口）");
         }
         return Ok(());
     }
@@ -60,7 +60,7 @@ pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
     let path = Config::path(config_path.as_deref());
     let (config, warning) = Config::load_or_create(&path);
     if let Some(warning) = &warning {
-        eprintln!("配置: {warning}");
+        log::warn!("配置: {warning}");
         ::log::warn!("{warning}");
     }
 
@@ -105,7 +105,7 @@ pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
         match Tray::add(hwnd, "window-cap - 截图工具") {
             Ok(tray) => app.tray = Some(tray),
             Err(error) => {
-                eprintln!("托盘不可用: {error}");
+                log::error!("托盘不可用: {error}");
                 ::log::warn!("tray unavailable: {error}");
             }
         }
@@ -119,12 +119,12 @@ pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
             if let Some(tray) = &app.tray {
                 tray.set_tooltip(&tooltip);
             }
-            println!("window-cap 已启动");
-            println!("  截图: {}", app.capture_label);
+            log::info!("window-cap 已启动");
+            log::info!("  截图: {}", app.capture_label);
             if app.quit_label.is_empty() {
-                println!("  退出: 托盘菜单");
+                log::info!("  退出: 托盘菜单");
             } else {
-                println!("  退出: {}", app.quit_label);
+                log::info!("  退出: {}", app.quit_label);
             }
             ::log::info!(
                 "resident started: capture={} quit={}",
@@ -153,11 +153,11 @@ pub fn run_once(config_path: Option<PathBuf>, delay_ms: u64) -> Result<()> {
     let path = Config::path(config_path.as_deref());
     let (mut config, warning) = Config::load_or_create(&path);
     if let Some(warning) = warning {
-        eprintln!("配置: {warning}");
+        log::warn!("配置: {warning}");
     }
 
     if delay_ms > 0 {
-        println!("{delay_ms} ms 后截图…");
+        log::info!("{delay_ms} ms 后截图…");
         std::thread::sleep(Duration::from_millis(delay_ms));
     }
 
@@ -165,13 +165,13 @@ pub fn run_once(config_path: Option<PathBuf>, delay_ms: u64) -> Result<()> {
         Some(outcome) => {
             config.capture.set_last_rect(outcome.rect);
             if let Err(error) = config.save(&path) {
-                eprintln!("保存上次选区失败: {error}");
+                log::warn!("保存上次选区失败: {error}");
             }
-            println!("{}", outcome.message());
+            log::info!("{}", outcome.message());
             Ok(())
         }
         None => {
-            println!("已取消");
+            log::info!("已取消");
             Ok(())
         }
     }
@@ -251,11 +251,11 @@ pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
     let gdi_delta = gdi_after as i64 - gdi_before as i64;
     let user_delta = user_after as i64 - user_before as i64;
 
-    println!(
+    log::info!(
         "overlay selftest: {confirmed}/{iterations} 次确认（预热 {warmup} 次），平均 {:.1} ms/次",
         elapsed.as_secs_f64() * 1000.0 / iterations as f64
     );
-    println!(
+    log::info!(
         "GDI {} -> {} ({:+})，USER {} -> {} ({:+})，内存 {:.1} -> {:.1} MB",
         gdi_before,
         gdi_after,
@@ -461,9 +461,9 @@ impl App {
             tray.notify(message, is_error);
         }
         if is_error {
-            eprintln!("{message}");
+            log::error!("{message}");
         } else {
-            println!("{message}");
+            log::info!("{message}");
         }
     }
 

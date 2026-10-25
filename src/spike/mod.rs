@@ -66,18 +66,21 @@ pub fn run(name: &str) -> Result<()> {
 /// 验证 GDI 能否截取虚拟桌面并保存 PNG。
 fn capture_spike() -> Result<()> {
     let screen = VirtualScreen::current();
-    println!(
+    log::info!(
         "[S1] 虚拟桌面: {}x{} @ ({}, {})",
-        screen.width, screen.height, screen.x, screen.y
+        screen.width,
+        screen.height,
+        screen.x,
+        screen.y
     );
     if screen.width <= 0 || screen.height <= 0 {
         return Err(AppError::msg("虚拟桌面尺寸无效"));
     }
 
     let monitors = capture::monitors();
-    println!("[S1] 显示器数量: {}", monitors.len());
+    log::info!("[S1] 显示器数量: {}", monitors.len());
     for (index, monitor) in monitors.iter().enumerate() {
-        println!(
+        log::info!(
             "      #{} {} {}x{} @ ({}, {}) dpi={}x{} device={}",
             index,
             if monitor.primary {
@@ -98,7 +101,7 @@ fn capture_spike() -> Result<()> {
     let started = Instant::now();
     let frame = capture::gdi::capture(screen)?;
     let elapsed = started.elapsed();
-    println!(
+    log::info!(
         "[S1] 截屏 {}x{} @ ({}, {})，耗时 {:.1} ms，非黑像素 {:.1}%",
         frame.width,
         frame.height,
@@ -110,10 +113,10 @@ fn capture_spike() -> Result<()> {
 
     let path = std::path::Path::new("target/spike/s1-capture.png");
     output::save_png(&frame, path)?;
-    println!("[S1] 已保存 {}", path.display());
+    log::info!("[S1] 已保存 {}", path.display());
 
     if frame.non_black_ratio() < 0.01 {
-        println!("[S1] 警告: 画面几乎全黑（锁屏/无桌面/采集受限），结论需人工复核");
+        log::info!("[S1] 警告: 画面几乎全黑（锁屏/无桌面/采集受限），结论需人工复核");
     }
 
     Ok(())
@@ -244,12 +247,12 @@ fn gdiplus_spike() -> Result<()> {
 
         let lit = count_lit_region(dib.pixels(), 3840, 1200, 1700, 3000, 1920);
 
-        println!(
+        log::info!(
             "[S4] 4K DIB（3840x2160）8 形状 × {iterations} 次: 总 {:.1} ms，平均 {:.2} ms/帧",
             elapsed.as_secs_f64() * 1000.0,
             elapsed.as_secs_f64() * 1000.0 / iterations as f64
         );
-        println!(
+        log::info!(
             "[S4] 文字区域非黑像素: {lit}（{}）",
             if lit > 500 {
                 "CJK 渲染正常"
@@ -320,11 +323,14 @@ fn focus_spike() -> Result<()> {
         let _ = SetFocus(Some(hwnd));
 
         SetTimer(Some(hwnd), 1, 4000, None);
-        println!(
+        log::info!(
             "[S2] 全屏遮罩已显示: {}x{} @ ({}, {})",
-            screen.width, screen.height, screen.x, screen.y
+            screen.width,
+            screen.height,
+            screen.x,
+            screen.y
         );
-        println!(
+        log::info!(
             "[S2] SetForegroundWindow 直接结果: {direct}; AttachThreadInput: {attached} -> {after_attach}; 最终前台: {focused}"
         );
 
@@ -348,8 +354,8 @@ fn focus_spike() -> Result<()> {
         }
 
         let received = ESC_RECEIVED.load(Ordering::SeqCst);
-        println!("[S2] 注入 Esc 后窗口收到 WM_KEYDOWN: {received}");
-        println!(
+        log::info!("[S2] 注入 Esc 后窗口收到 WM_KEYDOWN: {received}");
+        log::info!(
             "[S2] 结论: {}",
             if focused && received {
                 "通过：可抢焦点并接收键盘"
@@ -444,10 +450,10 @@ fn ime_spike() -> Result<()> {
         let ime_context = ImmGetContext(edit);
         let ime_window = ImmGetDefaultIMEWnd(hwnd);
 
-        println!("[S3] 键盘布局: {:?}，是否 IME: {is_ime}", keyboard_layout.0);
-        println!("[S3] EDIT 的 IME 上下文: {}", !ime_context.0.is_null());
-        println!("[S3] 默认 IME 窗口: {}", !ime_window.0.is_null());
-        println!("[S3] 请在弹出的编辑框里用中文输入法输入几个字（2 秒后自动关闭）");
+        log::info!("[S3] 键盘布局: {:?}，是否 IME: {is_ime}", keyboard_layout.0);
+        log::info!("[S3] EDIT 的 IME 上下文: {}", !ime_context.0.is_null());
+        log::info!("[S3] 默认 IME 窗口: {}", !ime_window.0.is_null());
+        log::info!("[S3] 请在弹出的编辑框里用中文输入法输入几个字（2 秒后自动关闭）");
 
         if !ime_context.0.is_null() {
             let _ = ImmReleaseContext(edit, ime_context);
