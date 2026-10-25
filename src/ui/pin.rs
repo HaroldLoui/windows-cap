@@ -9,14 +9,15 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint,
-    CreateCompatibleDC, CreateDIBSection, CreateSolidBrush, DEFAULT_GUI_FONT, DIB_RGB_COLORS,
-    DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject,
-    DrawTextW, EndPaint, FillRect, GetDC, GetStockObject, HGDIOBJ, InvalidateRect, PAINTSTRUCT,
-    ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, CreateSolidBrush, DEFAULT_GUI_FONT,
+    DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC,
+    DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetStockObject, HGDIOBJ, InvalidateRect,
+    PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_ESCAPE,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    VK_CONTROL, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
@@ -34,6 +35,7 @@ use windows::core::{PCWSTR, w};
 
 use crate::capture::Frame;
 use crate::output::{clipboard, files};
+use crate::ui::toolbar::{PIN_ACTIONS_HEIGHT, PIN_ACTIONS_WIDTH, paint_pin_actions};
 use crate::util::error::Result;
 
 const PIN_CLASS: PCWSTR = w!("window_cap_pin");
@@ -46,8 +48,7 @@ const MAX_SIZE: i32 = 8000;
 const HINT_TIMER: usize = 1;
 const ZOOM_TIMER: usize = 1;
 const ZOOM_HIDE_MS: u32 = 900;
-const ACTIONS_WIDTH: i32 = 150;
-const ACTIONS_HEIGHT: i32 = 30;
+const WM_MOUSELEAVE_EVENT: u32 = 0x02A3;
 const HINT_TEXT: &str = "已贴图 · 拖动移动 · Ctrl+滚轮缩放 · Esc/双击关闭";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,7 @@ struct PinState {
 
 struct ActionsState {
     pin: HWND,
+    hover: i32,
 }
 
 /// 创建一个贴图窗口（不阻塞，常驻消息循环继续处理）。
@@ -717,12 +719,25 @@ unsafe fn show_hint(pin: HWND, placement: HintPlacement, text: &str, duration: u
     }
 }
 
+fn action_hit(x: i32, y: i32) -> Option<usize> {
+    if !(6..36).contains(&y) {
+        return None;
+    }
+    for index in 0..3 {
+        let left = 6 + index * 34;
+        if x >= left && x < left + 30 {
+            return Some(index as usize);
+        }
+    }
+    None
+}
+
 fn actions_position(pin_rect: &RECT) -> (i32, i32) {
     let content_top = pin_rect.top + SHADOW;
     let content_bottom = pin_rect.bottom - SHADOW;
     let content_right = pin_rect.right - SHADOW;
-    let x = (content_right - ACTIONS_WIDTH).max(8);
-    let mut y = content_top - ACTIONS_HEIGHT - 8;
+    let x = (content_right - PIN_ACTIONS_WIDTH).max(8);
+    let mut y = content_top - PIN_ACTIONS_HEIGHT - 8;
     if y < 8 {
         y = content_bottom + 8;
     }
@@ -739,7 +754,7 @@ unsafe fn create_actions(pin: HWND) -> HWND {
             return HWND(null_mut());
         }
         let (x, y) = actions_position(&pin_rect);
-        let raw_state = Box::into_raw(Box::new(ActionsState { pin }));
+        let raw_state = Box::into_raw(Box::new(ActionsState { pin, hover: -1 }));
         let actions = match CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             ACTIONS_CLASS,
@@ -747,8 +762,8 @@ unsafe fn create_actions(pin: HWND) -> HWND {
             WS_POPUP | WS_VISIBLE,
             x,
             y,
-            ACTIONS_WIDTH,
-            ACTIONS_HEIGHT,
+            PIN_ACTIONS_WIDTH,
+            PIN_ACTIONS_HEIGHT,
             None,
             None,
             Some(hinstance),
@@ -761,6 +776,10 @@ unsafe fn create_actions(pin: HWND) -> HWND {
             }
         };
         let _ = ShowWindow(actions, SW_SHOWNOACTIVATE);
+        let region = CreateRoundRectRgn(0, 0, PIN_ACTIONS_WIDTH, PIN_ACTIONS_HEIGHT, 20, 20);
+        if !region.is_invalid() {
+            let _ = SetWindowRgn(actions, Some(region), true);
+        }
         actions
     }
 }
@@ -809,39 +828,37 @@ unsafe extern "system" fn actions_wndproc(
             WM_PAINT => {
                 let mut paint = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut paint);
-                let background = CreateSolidBrush(COLORREF(0x0020_2020));
-                let rect = RECT {
-                    left: 0,
-                    top: 0,
-                    right: ACTIONS_WIDTH,
-                    bottom: ACTIONS_HEIGHT,
-                };
-                FillRect(hdc, &rect, background);
-                let _ = DeleteObject(HGDIOBJ(background.0));
-
-                let labels = ["复制", "保存", "关闭"];
-                let cell_width = ACTIONS_WIDTH / 3;
-                SetBkMode(hdc, TRANSPARENT);
-                let old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
-                for (index, label) in labels.iter().enumerate() {
-                    let left = cell_width * index as i32;
-                    let mut cell = RECT {
-                        left,
-                        top: 0,
-                        right: left + cell_width,
-                        bottom: ACTIONS_HEIGHT,
-                    };
-                    SetTextColor(hdc, COLORREF(0x00E0_E0E0));
-                    let mut wide_label = wide(label);
-                    DrawTextW(
-                        hdc,
-                        &mut wide_label,
-                        &mut cell,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-                    );
+                if let Some(actions) = actions_state(hwnd) {
+                    let hover = (actions.hover >= 0).then_some(actions.hover as usize);
+                    paint_pin_actions(hdc, hover);
                 }
-                SelectObject(hdc, old_font);
                 let _ = EndPaint(hwnd, &paint);
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                if let Some(actions) = actions_state(hwnd) {
+                    let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                    let hover = action_hit(x, y).map(|index| index as i32).unwrap_or(-1);
+                    if actions.hover != hover {
+                        actions.hover = hover;
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                    let mut track = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    let _ = TrackMouseEvent(&mut track);
+                }
+                LRESULT(0)
+            }
+            WM_MOUSELEAVE_EVENT => {
+                if let Some(actions) = actions_state(hwnd) {
+                    actions.hover = -1;
+                }
+                let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
@@ -851,8 +868,9 @@ unsafe extern "system" fn actions_wndproc(
                 let _ = SetForegroundWindow(actions.pin);
                 let _ = SetFocus(Some(actions.pin));
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
-                if x >= 0 {
-                    match (x / (ACTIONS_WIDTH / 3)).clamp(0, 2) {
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                if let Some(index) = action_hit(x, y) {
+                    match index {
                         0 => pin_copy(actions.pin),
                         1 => pin_save(actions.pin),
                         2 => {

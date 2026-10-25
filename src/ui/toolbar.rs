@@ -21,6 +21,8 @@ use crate::capture::{RectI, VirtualScreen};
 
 const ACCENT: u32 = 0xFFFF_9B2E;
 const PANEL_BG: u32 = 0xF21B_1B20;
+pub const PIN_ACTIONS_WIDTH: i32 = 110;
+pub const PIN_ACTIONS_HEIGHT: i32 = 42;
 const PANEL_BORDER: u32 = 0xFF3A_3A42;
 const ICON_COLOR: u32 = 0xFFE8_E8EC;
 const ICON_DIM: u32 = 0xFF6E_6E76;
@@ -715,6 +717,53 @@ unsafe fn stroke_rect(
 }
 
 // ---------------- 图标（18 单位坐标系） ----------------
+
+/// 贴图窗口外侧的小操作条（复制/保存/关闭），风格与工具栏一致。
+pub fn paint_pin_actions(hdc: HDC, hover: Option<usize>) {
+    let _ = render::init();
+    unsafe {
+        let mut graphics: *mut GpGraphics = null_mut();
+        if GdipCreateFromHDC(hdc, &mut graphics).0 != 0 || graphics.is_null() {
+            return;
+        }
+        let _ = GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+        let s = 1.0;
+        let width = PIN_ACTIONS_WIDTH as f32;
+        let height = PIN_ACTIONS_HEIGHT as f32;
+        fill_rounded(
+            graphics,
+            s,
+            s,
+            width - 2.0 * s,
+            height - 2.0 * s,
+            10.0 * s,
+            PANEL_BG,
+        );
+        stroke_rounded(
+            graphics,
+            s,
+            s,
+            width - 2.0 * s,
+            height - 2.0 * s,
+            10.0 * s,
+            PANEL_BORDER,
+            s,
+        );
+        let icons = [Icon::Copy, Icon::Save, Icon::Close];
+        for (index, icon) in icons.iter().enumerate() {
+            let left = 6.0 * s + index as f32 * 34.0 * s;
+            let top = 6.0 * s;
+            if hover == Some(index) {
+                let background = if index == 2 { CLOSE_HOVER } else { HOVER_BG };
+                fill_rounded(graphics, left, top, 30.0 * s, 30.0 * s, 7.0 * s, background);
+            }
+            let color = if index == 2 { CLOSE_COLOR } else { ICON_COLOR };
+            draw_icon(graphics, *icon, left, top, s, color);
+        }
+        let _ = GdipFlush(graphics, FlushIntentionSync);
+        let _ = GdipDeleteGraphics(graphics);
+    }
+}
 
 unsafe fn draw_icon(graphics: *mut GpGraphics, icon: Icon, x: f32, y: f32, s: f32, color: u32) {
     unsafe {
