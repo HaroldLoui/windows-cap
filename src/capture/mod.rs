@@ -197,12 +197,12 @@ impl Frame {
         if self.bgra.is_empty() {
             return 0.0;
         }
-        let lit = self
-            .bgra
-            .chunks_exact(4)
+        let (pixels, _) = self.bgra.as_chunks::<4>();
+        let lit = pixels
+            .iter()
             .filter(|pixel| pixel[0] | pixel[1] | pixel[2] != 0)
             .count();
-        lit as f64 / (self.bgra.len() / 4) as f64
+        lit as f64 / pixels.len().max(1) as f64
     }
 
     /// 与另一张同尺寸画面的差异像素占比；尺寸不同视为 100%。
@@ -214,7 +214,9 @@ impl Frame {
             return 1.0;
         }
         let mut different = 0usize;
-        for (left, right) in self.bgra.chunks_exact(4).zip(other.bgra.chunks_exact(4)) {
+        let (left_chunks, _) = self.bgra.as_chunks::<4>();
+        let (right_chunks, _) = other.bgra.as_chunks::<4>();
+        for (left, right) in left_chunks.iter().zip(right_chunks.iter()) {
             if left[0] != right[0] || left[1] != right[1] || left[2] != right[2] {
                 different += 1;
             }

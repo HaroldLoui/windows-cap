@@ -12,7 +12,7 @@ use crate::util::error::{AppError, Result};
 pub fn save_png(frame: &Frame, path: &Path) -> Result<()> {
     // BGRA -> RGBA，alpha 统一为不透明。
     let mut rgba = frame.bgra.clone();
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
         pixel[3] = 255;
     }

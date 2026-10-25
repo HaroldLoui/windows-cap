@@ -1471,7 +1471,7 @@ impl Drop for Overlay {
 fn dim_bgra(bgra: &[u8]) -> Vec<u8> {
     const FACTOR: u16 = 115;
     let mut dimmed = bgra.to_vec();
-    for pixel in dimmed.chunks_exact_mut(4) {
+    for pixel in dimmed.as_chunks_mut::<4>().0 {
         for channel in &mut pixel[..3] {
             *channel = ((*channel as u16 * FACTOR) / 255) as u8;
         }

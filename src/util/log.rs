@@ -78,9 +78,20 @@ pub fn init(verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn log_file() -> Option<PathBuf> {
+/// 日志目录：`%LOCALAPPDATA%\window-cap\logs`。
+fn log_dir() -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
     let dir = base.join("window-cap").join("logs");
     std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join("window-cap.log"))
+    Some(dir)
+}
+
+fn log_file() -> Option<PathBuf> {
+    Some(log_dir()?.join("window-cap.log"))
+}
+
+/// CLI 输出日志路径（release 下 stdout/stderr 写入这里）。
+#[cfg(not(debug_assertions))]
+pub fn cli_log_file() -> Option<PathBuf> {
+    Some(log_dir()?.join("cli.log"))
 }
