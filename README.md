@@ -4,7 +4,7 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 
 仓库：<https://github.com/HaroldLoui/windows-cap>
 
-当前版本：**0.10.0-beta.6**（Beta）。支持 Windows 10/11，单显示器 100% DPI 已验证；4K/多屏/混合 DPI 仍在兼容性测试中。
+当前版本：**0.10.0-beta.7**（Beta）。支持 Windows 10/11，单显示器 100% DPI 已验证；4K/多屏/混合 DPI 仍在兼容性测试中。
 
 ![工具栏](docs/images/toolbar.png)
 
@@ -17,6 +17,7 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 - **贴图 Pin**：截图置顶悬浮，阴影、拖动、Ctrl+滚轮缩放（显示百分比）、复制/保存/关闭
 - **输出**：复制到剪贴板（CF_DIB）、PNG 原子写入
 - **常驻**：托盘菜单、全局热键、单实例、配置、开机自启、延迟截图、上次选区
+- **设置页**：托盘“设置...”或 `--settings`，编辑热键、保存目录、延迟、复制/保存开关、开机自启
 - **打包**：一键生成便携 zip
 
 <p>
@@ -72,6 +73,7 @@ Release 版本为无控制台 GUI 程序，CLI 输出写入日志：`app.log` �
 
 ```powershell
 window-cap.exe                 # 常驻
+window-cap.exe --settings      # 打开设置窗口
 window-cap.exe --once          # 立即截图一次后退出
 window-cap.exe --capture --region 100,100,400,300 --output shot.png
 window-cap.exe --capture --last --output shot.png

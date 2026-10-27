@@ -650,12 +650,38 @@ impl App {
             TrayCommand::Capture => self.start_capture(false),
             TrayCommand::DelayedCapture => self.start_capture(true),
             TrayCommand::LastRegion => self.capture_last_region(),
+            TrayCommand::Settings => self.open_settings(),
             TrayCommand::ReloadConfig => self.reload_config(),
             TrayCommand::ToggleAutostart => self.toggle_autostart(),
             TrayCommand::OpenConfig => self.open_config(),
             TrayCommand::Quit => unsafe {
                 let _ = DestroyWindow(self.hwnd);
             },
+        }
+    }
+
+    fn open_settings(&mut self) {
+        unsafe {
+            let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_CAPTURE);
+            let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_QUIT);
+        }
+        match crate::ui::settings::open(&self.config, &self.config_path) {
+            Ok(Some(config)) => {
+                self.config = config;
+                if self.apply_hotkeys() {
+                    if let Some(tray) = &self.tray {
+                        tray.set_tooltip(&format!("window-cap - {} 截图", self.capture_label));
+                    }
+                    self.notify("设置已保存", false);
+                }
+            }
+            Ok(None) => {
+                let _ = self.apply_hotkeys();
+            }
+            Err(error) => {
+                self.notify(&format!("打开设置失败: {error}"), true);
+                let _ = self.apply_hotkeys();
+            }
         }
     }
 

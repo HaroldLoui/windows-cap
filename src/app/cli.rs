@@ -20,6 +20,10 @@ pub struct Cli {
     #[arg(long)]
     pub hotkey: bool,
 
+    /// 打开设置窗口后退出
+    #[arg(long)]
+    pub settings: bool,
+
     /// 立即执行一次截图流程后退出（测试用）
     #[arg(long)]
     pub once: bool,
@@ -100,6 +104,9 @@ pub enum Command {
     Resident {
         config: Option<PathBuf>,
     },
+    Settings {
+        config: Option<PathBuf>,
+    },
     Once {
         config: Option<PathBuf>,
         delay_ms: u64,
@@ -170,6 +177,7 @@ impl Cli {
 
         let modes = [
             self.hotkey,
+            self.settings,
             self.once,
             self.selftest,
             self.capture,
@@ -184,7 +192,7 @@ impl Cli {
 
         if modes > 1 {
             return Err(AppError::msg(
-                "只能指定一个运行模式：--hotkey / --once / --selftest / --capture / --soak / --spike / --overlay-selftest / --autostart",
+                "只能指定一个运行模式：--hotkey / --settings / --once / --selftest / --capture / --soak / --spike / --overlay-selftest / --autostart",
             ));
         }
 
@@ -201,6 +209,11 @@ impl Cli {
         // 步骤 2：按优先级选择命令。
         if let Some(action) = self.autostart {
             return Ok(Command::Autostart(action));
+        }
+        if self.settings {
+            return Ok(Command::Settings {
+                config: self.config,
+            });
         }
         if let Some(iterations) = self.soak {
             if iterations == 0 {

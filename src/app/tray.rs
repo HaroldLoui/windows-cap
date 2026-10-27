@@ -27,6 +27,7 @@ pub enum TrayCommand {
     Capture,
     DelayedCapture,
     LastRegion,
+    Settings,
     ReloadConfig,
     ToggleAutostart,
     OpenConfig,
@@ -39,6 +40,7 @@ impl TrayCommand {
             Self::Capture => 1,
             Self::DelayedCapture => 2,
             Self::LastRegion => 3,
+            Self::Settings => 8,
             Self::ReloadConfig => 4,
             Self::ToggleAutostart => 5,
             Self::OpenConfig => 6,
@@ -51,6 +53,7 @@ impl TrayCommand {
             1 => Some(Self::Capture),
             2 => Some(Self::DelayedCapture),
             3 => Some(Self::LastRegion),
+            8 => Some(Self::Settings),
             4 => Some(Self::ReloadConfig),
             5 => Some(Self::ToggleAutostart),
             6 => Some(Self::OpenConfig),
@@ -155,6 +158,7 @@ impl Tray {
                 "延迟 3 秒截图",
             );
             append(menu, MF_STRING, TrayCommand::LastRegion.id(), &last_text);
+            append(menu, MF_STRING, TrayCommand::Settings.id(), "设置...");
             append(menu, MF_SEPARATOR, 0, "");
             append(
                 menu,

@@ -3,6 +3,7 @@
 pub mod overlay;
 pub mod pin;
 pub mod selection;
+pub mod settings;
 pub mod text_edit;
 pub mod toolbar;
 

@@ -274,6 +274,7 @@
 | 2026-10-25 | 无控制台/CLI 日志 | `v0.10.0-beta5` | `6359e40` | release 改 GUI 子系统，stdout/stderr 写入 logs/cli.log |
 | 2026-10-25 | 统一日志系统 | `v0.10.0-beta6` | `e8ac31e` | app/app-warn/app-error 分级日志，按天归档保留 3 天，println→log |
 | 2026-10-25 | GitHub Release | `v0.10.0-beta6` | `556f9f9` | 便携 zip 560KB 已发布，SHA256 已校验 |
+| 2026-10-27 | 设置页 GUI | `v0.10.0-beta7` | 本次提交 | 原生控件设置窗口，托盘/`--settings` 入口，保存后热键重注册 |
 
 ## 后续（P6 / 收尾）
 

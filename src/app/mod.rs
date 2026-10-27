@@ -27,6 +27,7 @@ pub fn run() -> Result<()> {
 
     match parsed.command {
         cli::Command::Resident { config } => hotkey::run_resident(config),
+        cli::Command::Settings { config } => settings_command(config),
         cli::Command::Once { config, delay_ms } => hotkey::run_once(config, delay_ms),
         cli::Command::Capture(options) => capture_command(options),
         cli::Command::Selftest => selftest(),
@@ -35,6 +36,19 @@ pub fn run() -> Result<()> {
         cli::Command::OverlaySelftest(iterations) => hotkey::run_overlay_selftest(iterations),
         cli::Command::Autostart(action) => autostart::run(action),
     }
+}
+
+/// 打开独立设置窗口（保存后退出；常驻模式请从托盘菜单打开）。
+pub(crate) fn settings_command(explicit_config: Option<PathBuf>) -> Result<()> {
+    let path = config::Config::path(explicit_config.as_deref());
+    let (config, warning) = config::Config::load_or_create(&path);
+    if let Some(warning) = warning {
+        log::warn!("{warning}");
+    }
+    if crate::ui::settings::open(&config, &path)?.is_some() {
+        log::info!("设置已保存: {}", path.display());
+    }
+    Ok(())
 }
 
 /// 无 UI 采集一次并按选项输出。
