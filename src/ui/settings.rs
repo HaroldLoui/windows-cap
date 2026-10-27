@@ -1,28 +1,35 @@
 //! 设置窗口：用原生控件编辑 config.toml 的常用项。
 
 use std::ffi::c_void;
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, DEFAULT_GUI_FONT, GetStockObject, HBRUSH, HGDIOBJ,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreatePen, CreateSolidBrush,
+    DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW,
+    FillRect, HBRUSH, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, PS_SOLID, RoundRect, SelectObject,
+    SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_SELECTED, SetWindowTheme};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
     BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SHBrowseForFolderW, SHGetPathFromIDListW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetMessageW,
-    GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU,
-    IsDialogMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostQuitMessage, RegisterClassW,
-    SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowTextW, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
-    WM_NCCREATE, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_MINIMIZEBOX,
-    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    BS_OWNERDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
+    GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW,
+    GetWindowTextW, HMENU, IsDialogMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW,
+    PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL, SendMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage, WM_CLOSE,
+    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_NCCREATE, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
@@ -46,7 +53,14 @@ const ID_CANCEL: usize = 110;
 
 const BN_CLICKED: u16 = 0;
 const BASE_WIDTH: i32 = 580;
-const BASE_HEIGHT: i32 = 460;
+const BASE_HEIGHT: i32 = 430;
+
+const BG_COLOR: COLORREF = COLORREF(0x0020_1B1B);
+const TEXT_COLOR: COLORREF = COLORREF(0x00EC_E8E8);
+const BORDER_COLOR: COLORREF = COLORREF(0x0042_3A3A);
+const HOVER_COLOR: COLORREF = COLORREF(0x0036_2E2E);
+const ACCENT_COLOR: COLORREF = COLORREF(0x002E_9BFF);
+const ACCENT_TEXT: COLORREF = COLORREF(0x001A_1A1A);
 
 static OPEN: AtomicBool = AtomicBool::new(false);
 
@@ -70,6 +84,8 @@ struct SettingsState {
     autostart: HWND,
     result: Option<Config>,
     scale: f32,
+    brush: HBRUSH,
+    font: HFONT,
 }
 
 /// 打开设置窗口；保存时返回新配置，取消/关闭返回 None。
@@ -84,7 +100,7 @@ pub fn open(config: &Config, path: &Path) -> Result<Option<Config>> {
         class.lpfnWndProc = Some(settings_wndproc);
         class.hInstance = hinstance;
         class.lpszClassName = CLASS_NAME;
-        class.hbrBackground = HBRUSH((COLOR_WINDOW.0 + 1) as *mut c_void);
+        class.hbrBackground = HBRUSH(null_mut());
         let _ = RegisterClassW(&class);
 
         let screen_width = GetSystemMetrics(SM_CXSCREEN);
@@ -95,6 +111,8 @@ pub fn open(config: &Config, path: &Path) -> Result<Option<Config>> {
         let height = (BASE_HEIGHT as f32 * scale) as i32;
         let x = (screen_width - width) / 2;
         let y = (screen_height - height) / 2;
+        let brush = CreateSolidBrush(BG_COLOR);
+        let font = create_font(scale);
 
         let raw_state = Box::into_raw(Box::new(SettingsState {
             config: config.clone(),
@@ -108,6 +126,8 @@ pub fn open(config: &Config, path: &Path) -> Result<Option<Config>> {
             autostart: HWND(null_mut()),
             result: None,
             scale,
+            brush,
+            font,
         }));
 
         let hwnd = match CreateWindowExW(
@@ -128,10 +148,19 @@ pub fn open(config: &Config, path: &Path) -> Result<Option<Config>> {
         ) {
             Ok(hwnd) => hwnd,
             Err(error) => {
+                let _ = DeleteObject(HGDIOBJ(brush.0));
+                let _ = DeleteObject(HGDIOBJ(font.0));
                 drop(Box::from_raw(raw_state));
                 return Err(error.into());
             }
         };
+        let dark: i32 = 1;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark as *const i32 as *const c_void,
+            size_of::<i32>() as u32,
+        );
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = SetForegroundWindow(hwnd);
 
@@ -144,7 +173,10 @@ pub fn open(config: &Config, path: &Path) -> Result<Option<Config>> {
         }
 
         let state = Box::from_raw(raw_state);
-        Ok(state.result.clone())
+        let result = state.result.clone();
+        let _ = DeleteObject(HGDIOBJ(state.brush.0));
+        let _ = DeleteObject(HGDIOBJ(state.font.0));
+        Ok(result)
     }
 }
 
@@ -165,6 +197,27 @@ fn s(value: f32, scale: f32) -> i32 {
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+unsafe fn create_font(scale: f32) -> HFONT {
+    unsafe {
+        CreateFontW(
+            -((15.0 * scale).round() as i32),
+            0,
+            0,
+            0,
+            400,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            DEFAULT_PITCH.0 as u32,
+            w!("Microsoft YaHei UI"),
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -200,13 +253,14 @@ unsafe fn create_control(
             None,
         );
         if let Ok(hwnd) = hwnd {
-            let font = GetStockObject(DEFAULT_GUI_FONT);
+            let font = state(parent).map(|s| s.font).unwrap_or(HFONT(null_mut()));
             let _ = SendMessageW(
                 hwnd,
                 WM_SETFONT,
-                Some(WPARAM(HGDIOBJ(font.0).0 as usize)),
+                Some(WPARAM(font.0 as usize)),
                 Some(LPARAM(1)),
             );
+            let _ = SetWindowTheme(hwnd, w!("DarkMode_Explorer"), PCWSTR::null());
             hwnd
         } else {
             HWND(null_mut())
@@ -230,7 +284,7 @@ unsafe fn create_controls(hwnd: HWND) {
 
         let static_style = WS_CHILD.0 | WS_VISIBLE.0;
         let edit_style = WS_CHILD.0 | WS_VISIBLE.0 | WS_BORDER.0 | WS_TABSTOP.0 | 0x0080; // ES_AUTOHSCROLL
-        let button_style = WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0;
+        let owner_style = WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_OWNERDRAW as u32;
         let check_style = WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | 0x0003; // BS_AUTOCHECKBOX
 
         let label = |text: &str, y: i32| {
@@ -292,7 +346,7 @@ unsafe fn create_controls(hwnd: HWND) {
             hwnd,
             w!("BUTTON"),
             w!("浏览..."),
-            button_style,
+            owner_style,
             field_x + field_width - s(80.0, scale),
             row,
             s(80.0, scale),
@@ -365,12 +419,12 @@ unsafe fn create_controls(hwnd: HWND) {
             0,
         );
 
-        let button_y = s(BASE_HEIGHT as f32, scale) - s(70.0, scale);
+        let button_y = s(BASE_HEIGHT as f32, scale) - s(80.0, scale);
         create_control(
             hwnd,
             w!("BUTTON"),
             w!("保存"),
-            button_style,
+            owner_style,
             s(BASE_WIDTH as f32, scale) - s(200.0, scale),
             button_y,
             s(80.0, scale),
@@ -381,7 +435,7 @@ unsafe fn create_controls(hwnd: HWND) {
             hwnd,
             w!("BUTTON"),
             w!("取消"),
-            button_style,
+            owner_style,
             s(BASE_WIDTH as f32, scale) - s(110.0, scale),
             button_y,
             s(80.0, scale),
@@ -435,6 +489,72 @@ unsafe fn read_text(hwnd: HWND) -> String {
         let mut buffer = vec![0u16; length as usize + 1];
         let copied = GetWindowTextW(hwnd, &mut buffer);
         String::from_utf16_lossy(&buffer[..copied.max(0) as usize])
+    }
+}
+
+unsafe fn draw_owner_button(hwnd: HWND, item: &DRAWITEMSTRUCT) {
+    unsafe {
+        let Some(settings) = state(hwnd) else {
+            return;
+        };
+        let save = item.CtlID == ID_SAVE as u32;
+        let browse = item.CtlID == ID_BROWSE as u32;
+        let pressed = item.itemState.0 & ODS_SELECTED.0 != 0;
+        let (background, border, text) = if save {
+            (
+                if pressed {
+                    COLORREF(0x002A_8AE6)
+                } else {
+                    ACCENT_COLOR
+                },
+                ACCENT_COLOR,
+                ACCENT_TEXT,
+            )
+        } else {
+            (
+                if pressed { HOVER_COLOR } else { BG_COLOR },
+                BORDER_COLOR,
+                TEXT_COLOR,
+            )
+        };
+
+        let brush = CreateSolidBrush(background);
+        let pen = CreatePen(PS_SOLID, 1, border);
+        let old_brush = SelectObject(item.hDC, HGDIOBJ(brush.0));
+        let old_pen = SelectObject(item.hDC, HGDIOBJ(pen.0));
+        let old_font = SelectObject(item.hDC, HGDIOBJ(settings.font.0));
+        SetBkMode(item.hDC, TRANSPARENT);
+        SetTextColor(item.hDC, text);
+
+        let mut rect = item.rcItem;
+        let radius = s(8.0, settings.scale);
+        let _ = RoundRect(
+            item.hDC,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            radius,
+            radius,
+        );
+        let mut label = wide(if save {
+            "保存"
+        } else if browse {
+            "浏览..."
+        } else {
+            "取消"
+        });
+        DrawTextW(
+            item.hDC,
+            &mut label,
+            &mut rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+        SelectObject(item.hDC, old_font);
+        SelectObject(item.hDC, old_pen);
+        SelectObject(item.hDC, old_brush);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+        let _ = DeleteObject(HGDIOBJ(brush.0));
     }
 }
 
@@ -542,6 +662,40 @@ unsafe extern "system" fn settings_wndproc(
 ) -> LRESULT {
     unsafe {
         match message {
+            WM_ERASEBKGND => {
+                let hdc = HDC(wparam.0 as *mut c_void);
+                if let Some(settings) = state(hwnd) {
+                    let mut rect = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rect);
+                    let _ = FillRect(hdc, &rect, settings.brush);
+                }
+                LRESULT(1)
+            }
+            WM_CTLCOLORSTATIC => {
+                let hdc = HDC(wparam.0 as *mut c_void);
+                if let Some(settings) = state(hwnd) {
+                    let _ = SetTextColor(hdc, TEXT_COLOR);
+                    let _ = SetBkMode(hdc, TRANSPARENT);
+                    return LRESULT(settings.brush.0 as isize);
+                }
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+            WM_CTLCOLOREDIT | WM_CTLCOLORBTN => {
+                let hdc = HDC(wparam.0 as *mut c_void);
+                if let Some(settings) = state(hwnd) {
+                    let _ = SetTextColor(hdc, TEXT_COLOR);
+                    let _ = SetBkColor(hdc, BG_COLOR);
+                    return LRESULT(settings.brush.0 as isize);
+                }
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+            WM_DRAWITEM => {
+                let item = lparam.0 as *const DRAWITEMSTRUCT;
+                if !item.is_null() {
+                    draw_owner_button(hwnd, &*item);
+                }
+                LRESULT(1)
+            }
             WM_NCCREATE => {
                 let create =
                     lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;

@@ -4,7 +4,7 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 
 仓库：<https://github.com/HaroldLoui/windows-cap>
 
-当前版本：**0.10.0-beta.7**（Beta）。支持 Windows 10/11，单显示器 100% DPI 已验证；4K/多屏/混合 DPI 仍在兼容性测试中。
+当前版本：**0.10.0-beta.8**（Beta）。支持 Windows 10/11，单显示器 100% DPI 已验证；4K/多屏/混合 DPI 仍在兼容性测试中。
 
 ![工具栏](docs/images/toolbar.png)
 
@@ -24,6 +24,8 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
   <img src="docs/images/annotation-step.png" width="46%" alt="序号标注">
   <img src="docs/images/pin.png" width="46%" alt="贴图操作条">
 </p>
+
+![设置页](docs/images/settings.png "暗色设置页")
 
 ## 快速开始
 
