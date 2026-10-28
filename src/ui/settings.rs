@@ -330,7 +330,7 @@ fn build_layout(scale: f32) -> Layout {
         bottom: y + pad + s(28.0, scale) + pad,
     };
     let toggle_rect = RECT {
-        left: card_startup.right - pad - s(76.0, scale),
+        left: card_startup.right - pad - s(44.0, scale),
         top: card_startup.top + pad,
         right: card_startup.right - pad,
         bottom: card_startup.top + pad + s(28.0, scale),
@@ -919,6 +919,11 @@ unsafe extern "system" fn settings_wndproc(
                                 settings.autostart_on = !settings.autostart_on;
                                 let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
                                     Some(settings.toggle),
+                                    None,
+                                    false,
+                                );
+                                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(
+                                    Some(hwnd),
                                     None,
                                     false,
                                 );
