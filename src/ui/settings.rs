@@ -443,10 +443,10 @@ unsafe fn create_label(parent: HWND, text: &str, rect: RECT, font: HFONT) -> HWN
 unsafe fn create_edit(parent: HWND, id: usize, rect: RECT, value: &str, font: HFONT) -> HWND {
     unsafe {
         let inset = RECT {
-            left: rect.left + 2,
-            top: rect.top + 2,
-            right: rect.right - 2,
-            bottom: rect.bottom - 2,
+            left: rect.left + s(6.0, scale_from_hwnd(parent)),
+            top: rect.top + s(4.0, scale_from_hwnd(parent)),
+            right: rect.right - s(6.0, scale_from_hwnd(parent)),
+            bottom: rect.bottom - s(2.0, scale_from_hwnd(parent)),
         };
         let style = WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | 0x0080; // ES_AUTOHSCROLL
         let hwnd = create_control(parent, w!("EDIT"), PCWSTR::null(), style, inset, id, font);
@@ -553,9 +553,9 @@ unsafe fn create_controls(hwnd: HWND) {
         );
         let browse_rect = RECT {
             left: layout.save_dir_field.right - s(80.0, scale),
-            top: layout.card_output.top + s(14.0, scale),
+            top: layout.card_output.top + s(10.0, scale),
             right: layout.save_dir_field.right,
-            bottom: layout.card_output.top + s(40.0, scale),
+            bottom: layout.card_output.top + s(35.0, scale),
         };
         settings.browse = create_owner_button(hwnd, ID_BROWSE, browse_rect, "浏览...", font);
         create_label(
