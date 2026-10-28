@@ -8,15 +8,13 @@ use std::time::Instant;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_TRANSITIONS_FORCEDISABLED, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
-    DEFAULT_CHARSET, DEFAULT_GUI_FONT, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FF_DONTCARE, FW_NORMAL, FillRect, FrameRect,
-    GetStockObject, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect, NULL_BRUSH, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
+    BeginPaint, BitBlt, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
+    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, FrameRect, GetStockObject, HBRUSH,
+    HDC, HFONT, HGDIOBJ, InvalidateRect, NULL_BRUSH, PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::Ime::{HIMC, ImmAssociateContext, ImmGetVirtualKey};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT,
@@ -38,6 +36,8 @@ use windows::core::{PCWSTR, w};
 use crate::annotate::{Document, Point, Shape, ShapeKind, render};
 use crate::capture::{Frame, RectI, VirtualScreen};
 use crate::platform::dib::Dib;
+use crate::ui::kit::dpi::scale_from_hwnd;
+use crate::ui::kit::text::create_font;
 use crate::ui::selection::{EndResult, HANDLE_HIT_TOLERANCE, Handle, SelectionState};
 use crate::ui::text_edit::{TextEditor, WM_TEXT_CANCEL, WM_TEXT_COMMIT};
 use crate::ui::toolbar::{COLORS, TOOLS, Tool, Toolbar, ToolbarAction, ToolbarState};
@@ -145,7 +145,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             size_we,
             size_all,
             font: HFONT(null_mut()),
-            accent: CreateSolidBrush(COLORREF(0x00FF_9B2E)),
+            accent: CreateSolidBrush(crate::ui::kit::theme::ACCENT_COLORREF),
             white: CreateSolidBrush(COLORREF(0x00FF_FFFF)),
             dark: CreateSolidBrush(COLORREF(0x0020_2020)),
             ui_scale: 1.0,
@@ -182,7 +182,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
         };
         // 步骤 3：初始化 DPI、字体与工具栏，显示并聚焦窗口。
         overlay.hwnd = hwnd;
-        overlay.ui_scale = (GetDpiForWindow(hwnd) as f32 / 96.0).max(1.0);
+        overlay.ui_scale = scale_from_hwnd(hwnd);
         overlay.font = create_font(overlay.ui_scale);
         overlay.refresh_toolbar();
 
@@ -1498,34 +1498,6 @@ fn dim_bgra(bgra: &[u8]) -> Vec<u8> {
         pixel[3] = 255;
     }
     dimmed
-}
-
-/// 按 DPI 创建界面字体；失败时退回系统默认字体。
-fn create_font(scale: f32) -> HFONT {
-    let height = -((15.0 * scale).round() as i32).max(10);
-    unsafe {
-        let font = CreateFontW(
-            height,
-            0,
-            0,
-            0,
-            FW_NORMAL.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            FF_DONTCARE.0 as u32,
-            w!("Microsoft YaHei UI"),
-        );
-        if font.0.is_null() {
-            HFONT(GetStockObject(DEFAULT_GUI_FONT).0)
-        } else {
-            font
-        }
-    }
 }
 
 /// 尽力把窗口置前；必要时临时附加前台线程输入队列。

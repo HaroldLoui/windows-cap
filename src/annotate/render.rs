@@ -1,9 +1,6 @@
 //! GDI+ 渲染：把形状光栅化到文档 DIB 或窗口 DC。
 
 use std::ptr::null_mut;
-use std::sync::Once;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use windows::Win32::Graphics::Gdi::HDC;
 use windows::Win32::Graphics::GdiPlus::{
     FillModeAlternate, FlushIntentionSync, FontStyleRegular, GdipCreateFont,
@@ -12,11 +9,10 @@ use windows::Win32::Graphics::GdiPlus::{
     GdipDeleteGraphics, GdipDeletePen, GdipDeleteStringFormat, GdipDrawEllipse, GdipDrawLine,
     GdipDrawLines, GdipDrawRectangle, GdipDrawString, GdipFillEllipse, GdipFillPolygon, GdipFlush,
     GdipSetPageUnit, GdipSetSmoothingMode, GdipSetStringFormatAlign, GdipSetStringFormatFlags,
-    GdipSetStringFormatLineAlign, GdipSetTextRenderingHint, GdipTranslateWorldTransform,
-    GdiplusStartup, GdiplusStartupInput, GdiplusStartupOutput, GpBrush, GpFont, GpFontCollection,
-    GpFontFamily, GpGraphics, GpPen, GpSolidFill, GpStringFormat, MatrixOrderAppend, PointF, RectF,
-    SmoothingModeAntiAlias, Status, StringAlignmentCenter, StringFormatFlagsNoWrap,
-    TextRenderingHintAntiAliasGridFit, UnitPixel,
+    GdipSetStringFormatLineAlign, GdipSetTextRenderingHint, GdipTranslateWorldTransform, GpBrush,
+    GpFont, GpFontCollection, GpFontFamily, GpGraphics, GpPen, GpSolidFill, GpStringFormat,
+    MatrixOrderAppend, PointF, RectF, SmoothingModeAntiAlias, Status, StringAlignmentCenter,
+    StringFormatFlagsNoWrap, TextRenderingHintAntiAliasGridFit, UnitPixel,
 };
 use windows::core::{PCWSTR, w};
 
@@ -24,28 +20,12 @@ use crate::annotate::{Point, Shape, ShapeKind};
 use crate::platform::dib::Dib;
 use crate::util::error::{AppError, Result};
 
-static INIT: Once = Once::new();
-static TOKEN: AtomicUsize = AtomicUsize::new(0);
-
 /// 进程级 GDI+ 初始化（幂等）。
 pub fn init() -> Result<()> {
-    INIT.call_once(|| unsafe {
-        let mut token = 0usize;
-        let input = GdiplusStartupInput {
-            GdiplusVersion: 1,
-            ..Default::default()
-        };
-        let mut output = GdiplusStartupOutput::default();
-        let status = GdiplusStartup(&mut token, &input, &mut output);
-        if status.0 == 0 {
-            TOKEN.store(token, Ordering::SeqCst);
-        }
-    });
-
-    if TOKEN.load(Ordering::SeqCst) == 0 {
-        Err(AppError::msg("GDI+ 初始化失败"))
-    } else {
+    if crate::ui::kit::gdiplus::init() {
         Ok(())
+    } else {
+        Err(AppError::msg("GDI+ 初始化失败"))
     }
 }
 

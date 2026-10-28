@@ -9,32 +9,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreatePen, CreateSolidBrush,
-    DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW,
-    FillRect, HBRUSH, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, PS_SOLID, RoundRect, SelectObject,
-    SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
+    CreatePen, CreateSolidBrush, DT_CENTER, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW,
+    FillRect, HBRUSH, HDC, HFONT, HGDIOBJ, PS_SOLID, RoundRect, SelectObject, SetBkColor,
+    SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_SELECTED, SetWindowTheme};
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
     BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SHBrowseForFolderW, SHGetPathFromIDListW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_OWNERDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetClientRect, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW,
-    GetWindowTextW, HMENU, IsDialogMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW,
-    PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL, SendMessageW,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DRAWITEM, WM_ERASEBKGND, WM_NCCREATE, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION,
-    WS_CHILD, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    GetClientRect, GetMessageW, GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW, HMENU,
+    IsDialogMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostQuitMessage, RegisterClassW,
+    SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowTextW, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_ERASEBKGND, WM_NCCREATE,
+    WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_MINIMIZEBOX, WS_OVERLAPPED,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
 use crate::app::autostart;
 use crate::app::config::{Config, Hotkey};
+use crate::ui::kit::dpi::{s, scale_from_hwnd};
+use crate::ui::kit::text::{create_font, wide};
+use crate::ui::kit::theme::{
+    ACCENT_COLORREF as ACCENT_COLOR, WINDOW_ACCENT_TEXT as ACCENT_TEXT, WINDOW_BG as BG_COLOR,
+    WINDOW_BORDER as BORDER_COLOR, WINDOW_HOVER as HOVER_COLOR, WINDOW_TEXT as TEXT_COLOR,
+};
 use crate::util::error::Result;
 
 const CLASS_NAME: PCWSTR = w!("window_cap_settings");
@@ -52,13 +56,6 @@ const ID_CANCEL: usize = 108;
 const BN_CLICKED: u16 = 0;
 const BASE_WIDTH: i32 = 580;
 const BASE_HEIGHT: i32 = 366;
-
-const BG_COLOR: COLORREF = COLORREF(0x0020_1B1B);
-const TEXT_COLOR: COLORREF = COLORREF(0x00EC_E8E8);
-const BORDER_COLOR: COLORREF = COLORREF(0x0042_3A3A);
-const HOVER_COLOR: COLORREF = COLORREF(0x0036_2E2E);
-const ACCENT_COLOR: COLORREF = COLORREF(0x002E_9BFF);
-const ACCENT_TEXT: COLORREF = COLORREF(0x001A_1A1A);
 
 static OPEN: AtomicBool = AtomicBool::new(false);
 
@@ -101,8 +98,7 @@ pub fn open(config: &Config, path: &Path) -> Result<Option<Config>> {
 
         let screen_width = GetSystemMetrics(SM_CXSCREEN);
         let screen_height = GetSystemMetrics(SM_CYSCREEN);
-        let scale = GetDpiForWindow(get_desktop_window_safe()) as f32 / 96.0;
-        let scale = scale.max(1.0);
+        let scale = scale_from_hwnd(get_desktop_window_safe());
         let width = (BASE_WIDTH as f32 * scale) as i32;
         let height = (BASE_HEIGHT as f32 * scale) as i32;
         let x = (screen_width - width) / 2;
@@ -175,43 +171,7 @@ pub fn open(config: &Config, path: &Path) -> Result<Option<Config>> {
 }
 
 unsafe fn state(hwnd: HWND) -> Option<&'static mut SettingsState> {
-    unsafe {
-        let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut SettingsState;
-        if pointer.is_null() {
-            None
-        } else {
-            Some(&mut *pointer)
-        }
-    }
-}
-
-fn s(value: f32, scale: f32) -> i32 {
-    (value * scale).round() as i32
-}
-
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-unsafe fn create_font(scale: f32) -> HFONT {
-    unsafe {
-        CreateFontW(
-            -((15.0 * scale).round() as i32),
-            0,
-            0,
-            0,
-            400,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            DEFAULT_PITCH.0 as u32,
-            w!("Microsoft YaHei UI"),
-        )
-    }
+    unsafe { crate::ui::kit::window::state(hwnd) }
 }
 
 #[allow(clippy::too_many_arguments)]

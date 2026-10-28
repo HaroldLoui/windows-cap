@@ -15,6 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
+use crate::ui::kit::text::wide;
 use crate::util::error::{AppError, Result};
 
 /// 托盘回调消息。
@@ -270,10 +271,6 @@ unsafe fn append(
             let _ = AppendMenuW(menu, flags, id, PCWSTR(wide.as_ptr()));
         }
     }
-}
-
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 fn copy_wide(text: &str, destination: &mut [u16]) {

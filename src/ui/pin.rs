@@ -35,6 +35,7 @@ use windows::core::{PCWSTR, w};
 
 use crate::capture::Frame;
 use crate::output::{clipboard, files};
+use crate::ui::kit::text::wide;
 use crate::ui::toolbar::{PIN_ACTIONS_HEIGHT, PIN_ACTIONS_WIDTH, paint_pin_actions};
 use crate::util::error::Result;
 
@@ -167,11 +168,6 @@ unsafe fn register_class(
         window_class.lpszClassName = name;
         let _ = RegisterClassW(&window_class);
     }
-}
-
-/// 转为以 NUL 结尾的 UTF-16 字符串。
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// 取得贴图窗口的可变状态。

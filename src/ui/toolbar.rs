@@ -18,19 +18,13 @@ use windows::Win32::Graphics::GdiPlus::{
 
 use crate::annotate::render;
 use crate::capture::{RectI, VirtualScreen};
+use crate::ui::kit::theme::{
+    ACCENT, ACTIVE_ICON, CLOSE_COLOR, CLOSE_HOVER, HOVER_BG, ICON_COLOR, ICON_DIM, PANEL_BG,
+    PANEL_BORDER, SEPARATOR,
+};
 
-const ACCENT: u32 = 0xFFFF_9B2E;
-const PANEL_BG: u32 = 0xF21B_1B20;
 pub const PIN_ACTIONS_WIDTH: i32 = 110;
 pub const PIN_ACTIONS_HEIGHT: i32 = 42;
-const PANEL_BORDER: u32 = 0xFF3A_3A42;
-const ICON_COLOR: u32 = 0xFFE8_E8EC;
-const ICON_DIM: u32 = 0xFF6E_6E76;
-const HOVER_BG: u32 = 0xFF2E_2E36;
-const ACTIVE_ICON: u32 = 0xFF1A_1A1A;
-const CLOSE_COLOR: u32 = 0xFFFF_7870;
-const CLOSE_HOVER: u32 = 0xCC7A_2A28;
-const SEPARATOR: u32 = 0x40FF_FFFF;
 
 /// 标注工具。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
