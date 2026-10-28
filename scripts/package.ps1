@@ -36,8 +36,6 @@ $configExample = @(
     '',
     '[output]',
     'save_dir = "Pictures/Screenshots"',
-    'copy_to_clipboard = true',
-    'save_file = true',
     'format = "png"',
     '',
     '[ui]',

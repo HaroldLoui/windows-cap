@@ -95,7 +95,6 @@ quit = "Ctrl+Alt+Q"
 
 [output]
 save_dir = "Pictures/Screenshots"
-copy_to_clipboard = true
 
 [capture]
 delay_ms = 0

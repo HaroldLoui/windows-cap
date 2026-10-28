@@ -29,9 +29,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IsWindow, KillTimer, LoadCursorW, MSG,
     PostThreadMessageW, RegisterClassW, SW_SHOW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
     SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CREATE,
-    WM_CTLCOLOREDIT, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
-    WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_CTLCOLOREDIT, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -59,10 +59,21 @@ pub struct OverlayOptions {
     pub allow_pin: bool,
 }
 
+/// 输出行为枚举
+#[derive(Clone, Copy, Debug)]
+pub enum OutputAction {
+    Copy,
+    Save,
+}
+
 /// 遮罩关闭后的结果。
 pub enum OverlayResult {
     /// 已确认：输出图像与对应选区。
-    Confirmed { image: Frame, rect: RectI },
+    Confirmed {
+        image: Frame,
+        rect: RectI,
+        action: OutputAction,
+    },
     /// 已贴图：仅输出图像。
     Pinned { image: Frame },
     /// 已取消。
@@ -431,7 +442,7 @@ impl Overlay {
     }
 
     /// 确认当前结果并关闭遮罩。
-    fn confirm(&mut self) {
+    fn confirm(&mut self, action: OutputAction) {
         if self.result.is_some() {
             return;
         }
@@ -447,7 +458,11 @@ impl Overlay {
             self.cancel();
             return;
         };
-        self.finish(OverlayResult::Confirmed { image, rect });
+        self.finish(OverlayResult::Confirmed {
+            image,
+            rect,
+            action,
+        });
     }
 
     /// 将当前图像作为贴图返回。
@@ -1066,8 +1081,12 @@ impl Overlay {
                     document.redo();
                 }
             }
-            ToolbarAction::Copy | ToolbarAction::Save => {
-                self.confirm();
+            ToolbarAction::Copy => {
+                self.confirm(OutputAction::Copy);
+                return;
+            }
+            ToolbarAction::Save => {
+                self.confirm(OutputAction::Save);
                 return;
             }
             ToolbarAction::Pin => {
@@ -1307,7 +1326,8 @@ impl Overlay {
         // 步骤 3：Ctrl 快捷键：确认、撤销/重做。
         if ctrl {
             match key {
-                key if key == b'C' as u16 || key == b'S' as u16 => self.confirm(),
+                key if key == b'C' as u16 => self.confirm(OutputAction::Copy),
+                key if key == b'S' as u16 => self.confirm(OutputAction::Save),
                 key if key == b'Z' as u16 => {
                     if shift {
                         if let Some(document) = self.document.as_mut() {
@@ -1334,7 +1354,7 @@ impl Overlay {
         // 步骤 4：普通快捷键：取消、确认、方向键、线宽与工具。
         match key {
             key if key == VK_ESCAPE.0 => self.cancel(),
-            key if key == VK_RETURN.0 => self.confirm(),
+            key if key == VK_RETURN.0 => self.confirm(OutputAction::Copy),
             key if key == VK_LEFT.0 => self.nudge(-1, 0, shift),
             key if key == VK_RIGHT.0 => self.nudge(1, 0, shift),
             key if key == VK_UP.0 => self.nudge(0, -1, shift),
@@ -1668,14 +1688,6 @@ unsafe extern "system" fn overlay_wndproc(
                 }
                 LRESULT(0)
             }
-            WM_LBUTTONDBLCLK => {
-                if let Some(overlay) = state(hwnd)
-                    && overlay.text_editor.is_none()
-                {
-                    overlay.confirm();
-                }
-                LRESULT(0)
-            }
             WM_RBUTTONUP => {
                 if let Some(overlay) = state(hwnd) {
                     overlay.cancel();
@@ -1698,7 +1710,7 @@ unsafe extern "system" fn overlay_wndproc(
             WM_TIMER => {
                 if let Some(overlay) = state(hwnd) {
                     match wparam.0 {
-                        TIMER_SCRIPT => overlay.confirm(),
+                        TIMER_SCRIPT => overlay.confirm(OutputAction::Copy),
                         TIMER_TOOLTIP => {
                             let _ = KillTimer(Some(hwnd), TIMER_TOOLTIP);
                             if overlay.toolbar_hover.is_some() {

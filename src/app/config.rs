@@ -62,8 +62,6 @@ impl CaptureConfig {
 pub struct OutputConfig {
     /// 保存目录；支持 `%USERPROFILE%` 前缀，相对路径按用户目录展开。
     pub save_dir: String,
-    pub copy_to_clipboard: bool,
-    pub save_file: bool,
     pub format: String,
 }
 
@@ -87,8 +85,6 @@ impl Default for OutputConfig {
     fn default() -> Self {
         Self {
             save_dir: "Pictures/Screenshots".to_string(),
-            copy_to_clipboard: true,
-            save_file: true,
             format: "png".to_string(),
         }
     }

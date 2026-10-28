@@ -7,4 +7,4 @@ pub mod settings;
 pub mod text_edit;
 pub mod toolbar;
 
-pub use overlay::{OverlayOptions, OverlayResult, select};
+pub use overlay::{OutputAction, OverlayOptions, OverlayResult, select};

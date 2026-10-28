@@ -102,8 +102,8 @@ pub enum ToolbarAction {
     Width(i32),
     Undo,
     Redo,
-    Copy,
     Pin,
+    Copy,
     Save,
     Cancel,
     Noop,
@@ -137,8 +137,8 @@ enum Icon {
     Tool(Tool),
     Undo,
     Redo,
-    Copy,
     Pin,
+    Copy,
     Save,
     Close,
     Minus,
@@ -182,11 +182,11 @@ impl Toolbar {
         let mut pin_actions: Vec<(Icon, ToolbarAction, bool)> = vec![
             (Icon::Undo, ToolbarAction::Undo, state.can_undo),
             (Icon::Redo, ToolbarAction::Redo, state.can_redo),
-            (Icon::Copy, ToolbarAction::Copy, true),
         ];
         if state.can_pin {
             pin_actions.push((Icon::Pin, ToolbarAction::Pin, true));
         }
+        pin_actions.push((Icon::Copy, ToolbarAction::Copy, true));
         pin_actions.push((Icon::Save, ToolbarAction::Save, true));
         pin_actions.push((Icon::Close, ToolbarAction::Cancel, true));
         let actions_width = pin_actions.len() as i32 * cell + (pin_actions.len() as i32 - 1) * gap;

@@ -27,7 +27,7 @@ use super::single_instance::{self, SingleInstance, WM_APP_ACTIVATE};
 use super::tray::{Tray, TrayCommand, WM_TRAY};
 use crate::capture::{CaptureBackend, GdiBackend, RectI, VirtualScreen};
 use crate::output::{clipboard, files};
-use crate::ui::{self, OverlayOptions, OverlayResult};
+use crate::ui::{self, OutputAction, OverlayOptions, OverlayResult};
 use crate::util::error::{AppError, Result};
 use crate::util::resources::process_resources;
 
@@ -230,6 +230,7 @@ pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
             OverlayResult::Confirmed {
                 image,
                 rect: selected,
+                action: _,
             } if selected == rect
                 && image.width == rect.width as u32
                 && image.height == rect.height as u32 =>
@@ -294,23 +295,13 @@ impl CaptureOutcome {
             );
         }
         match (&self.path, self.copied) {
-            (Some(path), true) => format!(
-                "已复制 {}×{} 并保存到 {}",
-                self.width,
-                self.height,
-                path.display()
-            ),
             (Some(path), false) => format!(
                 "已保存 {}×{} 到 {}",
                 self.width,
                 self.height,
                 path.display()
             ),
-            (None, true) => format!("已复制 {}×{} 到剪贴板", self.width, self.height),
-            (None, false) => format!(
-                "截图完成 {}×{}（未保存，请检查配置）",
-                self.width, self.height
-            ),
+            _ => format!("已截图 {}×{}", self.width, self.height),
         }
     }
 }
@@ -344,8 +335,22 @@ fn capture_flow(
 
     // 步骤 3：按确认结果输出图片、贴图或结束。
     match result {
-        OverlayResult::Confirmed { image, rect } => {
-            let (copied, path) = apply_outputs(&image, config)?;
+        OverlayResult::Confirmed {
+            image,
+            rect,
+            action,
+        } => {
+            let (copied, path) = match action {
+                OutputAction::Copy => {
+                    clipboard::put(&image)?;
+                    (true, None)
+                }
+                OutputAction::Save => {
+                    let target = files::path_in(&config.save_dir());
+                    files::save_png(&image, &target)?;
+                    (false, Some(target))
+                }
+            };
 
             ::log::info!(
                 "capture ok {}x{} capture_ms={:.1} copied={} saved={}",
@@ -387,28 +392,8 @@ fn capture_flow(
     }
 }
 
-fn apply_outputs(
-    image: &crate::capture::Frame,
-    config: &Config,
-) -> Result<(bool, Option<PathBuf>)> {
-    let mut copied = false;
-    if config.output.copy_to_clipboard {
-        clipboard::put(image)?;
-        copied = true;
-    }
-
-    let mut path = None;
-    if config.output.save_file {
-        let target = files::path_in(&config.save_dir());
-        files::save_png(image, &target)?;
-        path = Some(target);
-    }
-
-    Ok((copied, path))
-}
-
 /// 直接按给定区域截图（不走遮罩），用于“按上次选区截图”。
-fn capture_region(rect: RectI, config: &Config) -> Result<CaptureOutcome> {
+fn capture_region(rect: RectI) -> Result<CaptureOutcome> {
     let screen = VirtualScreen::current();
     if !screen.contains(rect) {
         return Err(AppError::msg(format!(
@@ -425,23 +410,23 @@ fn capture_region(rect: RectI, config: &Config) -> Result<CaptureOutcome> {
     };
     let mut backend = GdiBackend;
     let frame = backend.capture(area)?;
-    let (copied, path) = apply_outputs(&frame, config)?;
+    clipboard::put(&frame)?;
+
     ::log::info!(
-        "capture region {}x{} at ({}, {}) copied={} saved={}",
+        "capture region {}x{} at ({}, {}) copied={}",
         frame.width,
         frame.height,
         rect.x,
         rect.y,
-        copied,
-        path.is_some()
+        true
     );
 
     Ok(CaptureOutcome {
         width: frame.width,
         height: frame.height,
         rect,
-        path,
-        copied,
+        path: None,
+        copied: true,
         pinned: false,
     })
 }
@@ -526,7 +511,7 @@ impl App {
         match capture_flow(None, &self.config, true) {
             Ok(Some(outcome)) => {
                 self.remember_region(outcome.rect);
-                if !outcome.pinned {
+                if outcome.path.is_some() {
                     self.notify(&outcome.message(), false);
                 }
             }
@@ -553,10 +538,10 @@ impl App {
             return;
         };
 
-        match capture_region(rect, &self.config) {
+        match capture_region(rect) {
             Ok(outcome) => {
                 self.remember_region(outcome.rect);
-                if !outcome.pinned {
+                if outcome.path.is_some() {
                     self.notify(&outcome.message(), false);
                 }
             }

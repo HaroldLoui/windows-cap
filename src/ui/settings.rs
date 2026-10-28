@@ -45,15 +45,13 @@ const ID_QUIT: usize = 102;
 const ID_SAVE_DIR: usize = 103;
 const ID_BROWSE: usize = 104;
 const ID_DELAY: usize = 105;
-const ID_COPY: usize = 106;
-const ID_SAVE_FILE: usize = 107;
-const ID_AUTOSTART: usize = 108;
-const ID_SAVE: usize = 109;
-const ID_CANCEL: usize = 110;
+const ID_AUTOSTART: usize = 106;
+const ID_SAVE: usize = 107;
+const ID_CANCEL: usize = 108;
 
 const BN_CLICKED: u16 = 0;
 const BASE_WIDTH: i32 = 580;
-const BASE_HEIGHT: i32 = 430;
+const BASE_HEIGHT: i32 = 366;
 
 const BG_COLOR: COLORREF = COLORREF(0x0020_1B1B);
 const TEXT_COLOR: COLORREF = COLORREF(0x00EC_E8E8);
@@ -79,8 +77,6 @@ struct SettingsState {
     quit: HWND,
     save_dir: HWND,
     delay: HWND,
-    copy: HWND,
-    save_file: HWND,
     autostart: HWND,
     result: Option<Config>,
     scale: f32,
@@ -121,8 +117,6 @@ pub fn open(config: &Config, path: &Path) -> Result<Option<Config>> {
             quit: HWND(null_mut()),
             save_dir: HWND(null_mut()),
             delay: HWND(null_mut()),
-            copy: HWND(null_mut()),
-            save_file: HWND(null_mut()),
             autostart: HWND(null_mut()),
             result: None,
             scale,
@@ -368,31 +362,6 @@ unsafe fn create_controls(hwnd: HWND) {
             ID_DELAY,
         );
         row += row_height + s(18.0, scale);
-
-        settings.copy = create_control(
-            hwnd,
-            w!("BUTTON"),
-            w!("截图后复制到剪贴板"),
-            check_style,
-            margin,
-            row,
-            s(400.0, scale),
-            row_height,
-            ID_COPY,
-        );
-        row += row_height + s(4.0, scale);
-        settings.save_file = create_control(
-            hwnd,
-            w!("BUTTON"),
-            w!("截图后保存 PNG 文件"),
-            check_style,
-            margin,
-            row,
-            s(400.0, scale),
-            row_height,
-            ID_SAVE_FILE,
-        );
-        row += row_height + s(4.0, scale);
         settings.autostart = create_control(
             hwnd,
             w!("BUTTON"),
@@ -451,8 +420,6 @@ unsafe fn create_controls(hwnd: HWND) {
         let _ = SetWindowTextW(settings.quit, PCWSTR(quit.as_ptr()));
         let _ = SetWindowTextW(settings.save_dir, PCWSTR(save_dir.as_ptr()));
         let _ = SetWindowTextW(settings.delay, PCWSTR(delay.as_ptr()));
-        set_check(settings.copy, settings.config.output.copy_to_clipboard);
-        set_check(settings.save_file, settings.config.output.save_file);
         set_check(settings.autostart, autostart::is_enabled());
     }
 }
@@ -642,8 +609,6 @@ unsafe fn save_settings(hwnd: HWND) -> bool {
         config.hotkey.quit = quit;
         config.output.save_dir = save_dir;
         config.capture.delay_ms = delay;
-        config.output.copy_to_clipboard = check_state(settings.copy);
-        config.output.save_file = check_state(settings.save_file);
         let config = config.sanitize();
         if let Err(error) = config.save(&settings.path) {
             message_box(hwnd, &format!("保存配置失败: {error}"));
