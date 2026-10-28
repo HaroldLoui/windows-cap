@@ -18,6 +18,8 @@ use crate::util::error::Result;
 pub const WM_APP_ACTIVATE: u32 = WM_APP + 20;
 /// 转发消息标记（`WCAP`）。
 pub const FORWARD_MAGIC: usize = 0x5743_4150;
+/// 重新加载配置的标记（`WCAL`）。
+pub const RELOAD_MAGIC: usize = 0x5743_414C;
 
 /// 单实例互斥体。
 pub struct SingleInstance {
@@ -87,6 +89,30 @@ pub fn forward_to_existing(args: &[String]) -> bool {
         };
 
         // SAFETY: SendMessageW 同步返回，payload 与 data 在调用期间均有效。
+        SendMessageW(
+            hwnd,
+            WM_COPYDATA,
+            Some(WPARAM(0)),
+            Some(LPARAM(&data as *const COPYDATASTRUCT as isize)),
+        )
+        .0 != 0
+    }
+}
+
+/// 通知已运行实例重新加载配置；成功返回 true。
+pub fn forward_reload() -> bool {
+    unsafe {
+        let Ok(hwnd) = FindWindowW(w!("window_cap_hotkey"), PCWSTR::null()) else {
+            return false;
+        };
+        if hwnd == HWND(std::ptr::null_mut()) {
+            return false;
+        }
+        let data = COPYDATASTRUCT {
+            dwData: RELOAD_MAGIC,
+            cbData: 0,
+            lpData: std::ptr::null_mut(),
+        };
         SendMessageW(
             hwnd,
             WM_COPYDATA,

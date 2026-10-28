@@ -565,6 +565,10 @@ impl App {
                 (*data).lpData as *const u16,
             )
         };
+        if magic == single_instance::RELOAD_MAGIC {
+            self.reload_config();
+            return;
+        }
         if magic != single_instance::FORWARD_MAGIC || length < 2 || pointer.is_null() {
             return;
         }

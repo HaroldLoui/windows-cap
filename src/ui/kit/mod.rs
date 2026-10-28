@@ -4,4 +4,5 @@ pub mod dpi;
 pub mod gdiplus;
 pub mod text;
 pub mod theme;
+pub mod widgets;
 pub mod window;

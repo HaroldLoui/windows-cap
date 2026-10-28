@@ -69,7 +69,7 @@
 ## P4 交付清单
 
 - `app/cli.rs`：clap 4 重写；模式互斥、区域解析、`--delay` / `--config` / `--autostart`；中文帮助
-- `app/config.rs`：`%APPDATA%\window-cap\config.toml`；热键、保存目录、复制/保存开关、格式、语言；坏文件备份回退；热键解析与规范化
+- `app/config.rs`：`%APPDATA%\window-cap\config.toml`；热键、保存目录、格式、语言；坏文件备份回退；热键解析与规范化
 - `app/tray.rs`：`Shell_NotifyIconW` + 菜单（截图 / 延迟 3 秒 / 重新加载配置 / 打开配置文件 / 开机自启 / 退出）+ 气泡通知；从 exe 提取图标
 - `app/single_instance.rs`：命名互斥 + `WM_APP_ACTIVATE` 激活已有实例
 - `app/autostart.rs`：HKCU Run 写/删/查；CLI `--autostart on|off|status` + 托盘子菜单开关
@@ -278,6 +278,7 @@
 | 2026-10-27 | 设置页 GUI | `v0.10.0-beta7` | `9f0ecab` | 原生控件设置窗口，托盘/`--settings` 入口，保存后热键重注册 |
 | 2026-10-27 | 设置页暗色 | `v0.10.0-beta8` | `6797072` | DWM 暗色标题栏、深色背景、自绘按钮与暗色控件 |
 | 2026-10-28 | UI kit 1a | `-` | `382ab24` | 抽取 theme/text/dpi/window/gdiplus，去重并修复 overlay accent 色 |
+| 2026-10-28 | UI kit 1b + 设置页 | `v0.10.0-beta9` | 本次提交 | 卡片布局、热键录制器、自绘 toggle、DWM 圆角、常驻联动 |
 
 ## 后续（P6 / 收尾）
 

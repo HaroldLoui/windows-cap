@@ -46,7 +46,11 @@ pub(crate) fn settings_command(explicit_config: Option<PathBuf>) -> Result<()> {
         log::warn!("{warning}");
     }
     if crate::ui::settings::open(&config, &path)?.is_some() {
-        log::info!("设置已保存: {}", path.display());
+        if crate::app::single_instance::forward_reload() {
+            log::info!("设置已保存并通知常驻实例: {}", path.display());
+        } else {
+            log::info!("设置已保存: {}", path.display());
+        }
     }
     Ok(())
 }
