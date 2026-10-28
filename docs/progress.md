@@ -277,6 +277,7 @@
 | 2026-10-25 | GitHub Release | `v0.10.0-beta6` | `556f9f9` | 便携 zip 560KB 已发布，SHA256 已校验 |
 | 2026-10-27 | 设置页 GUI | `v0.10.0-beta7` | `9f0ecab` | 原生控件设置窗口，托盘/`--settings` 入口，保存后热键重注册 |
 | 2026-10-27 | 设置页暗色 | `v0.10.0-beta8` | `6797072` | DWM 暗色标题栏、深色背景、自绘按钮与暗色控件 |
+| 2026-10-28 | UI kit 1a | `-` | `382ab24` | 抽取 theme/text/dpi/window/gdiplus，去重并修复 overlay accent 色 |
 
 ## 后续（P6 / 收尾）
 
