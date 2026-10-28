@@ -2,11 +2,8 @@
 
 use std::ptr::null_mut;
 
-use windows::Win32::Foundation::{COLORREF, RECT};
-use windows::Win32::Graphics::Gdi::{
-    DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DrawTextW, HDC, HFONT, HGDIOBJ,
-    SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
-};
+use windows::Win32::Foundation::RECT;
+use windows::Win32::Graphics::Gdi::{HDC, HFONT};
 use windows::Win32::Graphics::GdiPlus::{
     FlushIntentionSync, GdipCreateFromHDC, GdipDeleteGraphics, GdipFlush, GdipSetSmoothingMode,
     GpGraphics, PointF, SmoothingModeAntiAlias,
@@ -18,9 +15,10 @@ use crate::ui::kit::shapes::{
     fill_ellipse, fill_polygon, fill_rounded, solid_fill, stroke_ellipse, stroke_line,
     stroke_lines, stroke_polygon, stroke_rect, stroke_rounded,
 };
+use crate::ui::kit::text as kit_text;
 use crate::ui::kit::theme::{
-    ACCENT, ACTIVE_ICON, CLOSE_COLOR, CLOSE_HOVER, HOVER_BG, ICON_COLOR, ICON_DIM, PANEL_BG,
-    PANEL_BORDER, SEPARATOR,
+    ACCENT, ACTIVE_ICON, CLOSE_COLOR, CLOSE_HOVER, HOVER_BG, ICON_COLOR, ICON_COLORREF, ICON_DIM,
+    PANEL_BG, PANEL_BORDER, SEPARATOR,
 };
 
 pub const PIN_ACTIONS_WIDTH: i32 = 110;
@@ -465,27 +463,17 @@ impl Toolbar {
             // 步骤 4：刷出 GDI+ 结果后用 GDI 绘制文字，再释放绘图对象。
             let _ = GdipFlush(graphics, FlushIntentionSync);
 
-            let old_font = SelectObject(hdc, HGDIOBJ(font.0));
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, COLORREF(0x00E8_E8EC));
             for button in &self.buttons {
                 if let Some(label) = &button.label {
-                    let mut wide: Vec<u16> = label.encode_utf16().collect();
                     let mut text_rect = RECT {
                         left: button.rect.x,
                         top: button.rect.y,
                         right: button.rect.x + button.rect.width,
                         bottom: button.rect.y + button.rect.height,
                     };
-                    DrawTextW(
-                        hdc,
-                        &mut wide,
-                        &mut text_rect,
-                        DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
-                    );
+                    kit_text::draw_text_centered(hdc, label, &mut text_rect, font, ICON_COLORREF);
                 }
             }
-            SelectObject(hdc, old_font);
 
             let _ = GdipDeleteGraphics(graphics);
         }

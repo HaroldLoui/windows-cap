@@ -1,7 +1,7 @@
 # 设置页重设计与 UI Kit 拆分方案
 
 > 日期：2026-10-28
-> 状态：1a/1b 已完成；第二期核心迁移（toolbar shapes + overlay/pin 文本）已完成，剩余零散样板可继续下沉
+> 状态：1a/1b 已完成；第二期及 UI 样板清理已完成
 > 前置调研：[设置页UI调研.md](设置页UI调研.md)（结论仍有效：不引入 windows-reactor / egui，坚持纯 Win32 + GDI+）
 
 ## 1. 背景

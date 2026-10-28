@@ -23,14 +23,13 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_OWNERDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GW_CHILD,
-    GW_HWNDNEXT, GWLP_USERDATA, GetClientRect, GetMessageW, GetSystemMetrics, GetWindow,
-    GetWindowTextLengthW, GetWindowTextW, HMENU, IsDialogMessageW, MB_ICONERROR, MB_OK, MSG,
-    MessageBoxW, PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL,
-    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ERASEBKGND, WM_NCCREATE,
-    WM_PAINT, WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_MINIMIZEBOX, WS_OVERLAPPED,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    GW_HWNDNEXT, GetClientRect, GetMessageW, GetSystemMetrics, GetWindow, GetWindowTextLengthW,
+    GetWindowTextW, HMENU, IsDialogMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW,
+    PostQuitMessage, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow,
+    SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM,
+    WM_ERASEBKGND, WM_NCCREATE, WM_PAINT, WM_SETFONT, WS_CAPTION, WS_CHILD, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
@@ -118,12 +117,11 @@ pub fn open(config: &Config, path: &Path) -> Result<Option<Config>> {
     let _guard = OpenGuard;
     unsafe {
         let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
-        let mut class: WNDCLASSW = std::mem::zeroed();
-        class.lpfnWndProc = Some(settings_wndproc);
-        class.hInstance = hinstance;
-        class.lpszClassName = CLASS_NAME;
-        class.hbrBackground = HBRUSH(null_mut());
-        let _ = RegisterClassW(&class);
+        crate::ui::kit::window::register_class(
+            CLASS_NAME,
+            settings_wndproc,
+            windows::Win32::UI::WindowsAndMessaging::WNDCLASS_STYLES(0),
+        );
 
         let screen_width = GetSystemMetrics(SM_CXSCREEN);
         let screen_height = GetSystemMetrics(SM_CYSCREEN);
@@ -826,11 +824,7 @@ unsafe extern "system" fn settings_wndproc(
     unsafe {
         match message {
             WM_NCCREATE => {
-                let create =
-                    lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
-                if !create.is_null() {
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*create).lpCreateParams as isize);
-                }
+                crate::ui::kit::window::bind_from_create(hwnd, lparam);
                 DefWindowProcW(hwnd, message, wparam, lparam)
             }
             WM_CREATE => {

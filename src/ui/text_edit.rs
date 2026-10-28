@@ -3,10 +3,7 @@
 use std::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DeleteObject,
-    FF_DONTCARE, FW_NORMAL, GetClipBox, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, SRCCOPY,
-};
+use windows::Win32::Graphics::Gdi::{BitBlt, DeleteObject, GetClipBox, HDC, HGDIOBJ, SRCCOPY};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::Ime::{
     HIMC, ImmAssociateContext, ImmCreateContext, ImmDestroyContext,
@@ -90,22 +87,7 @@ impl TextEditor {
             BACKGROUND_Y.store(client_position.1, Ordering::SeqCst);
 
             // 步骤 3：应用字体，并把 EDIT 的窗口过程子类化。
-            let font = CreateFontW(
-                font_height,
-                0,
-                0,
-                0,
-                FW_NORMAL.0 as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                FF_DONTCARE.0 as u32,
-                w!("Microsoft YaHei UI"),
-            );
+            let font = crate::ui::kit::text::create_font_with_height(font_height);
             if !font.0.is_null() {
                 SendMessageW(
                     edit,

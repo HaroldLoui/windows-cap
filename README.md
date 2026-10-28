@@ -4,7 +4,7 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 
 仓库：<https://github.com/HaroldLoui/windows-cap>
 
-当前版本：**0.10.0-beta.11**（Beta）。支持 Windows 10/11，单显示器 100% DPI 已验证；4K/多屏/混合 DPI 仍在兼容性测试中。
+当前版本：**0.10.0-beta.12**（Beta）。支持 Windows 10/11，单显示器 100% DPI 已验证；4K/多屏/混合 DPI 仍在兼容性测试中。
 
 ![工具栏](docs/images/toolbar.png)
 

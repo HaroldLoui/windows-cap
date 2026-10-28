@@ -19,16 +19,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_CONTROL, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CREATESTRUCTW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, GWLP_USERDATA, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, IsWindow, MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassW,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenu, ULW_ALPHA,
-    UpdateLayeredWindow, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NULL, WM_PAINT, WM_RBUTTONUP,
-    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP, WS_VISIBLE,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    GetClientRect, GetCursorPos, GetWindowRect, GetWindowTextW, IsWindow, MF_SEPARATOR, MF_STRING,
+    PostMessageW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TPM_LEFTALIGN,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenu, ULW_ALPHA, UpdateLayeredWindow,
+    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
@@ -84,10 +82,10 @@ struct ActionsState {
 pub fn show(image: Frame) -> Result<()> {
     unsafe {
         let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
-        register_class(hinstance, PIN_CLASS, pin_wndproc);
-        register_class(hinstance, HINT_CLASS, hint_wndproc);
-        register_class(hinstance, ZOOM_CLASS, zoom_wndproc);
-        register_class(hinstance, ACTIONS_CLASS, actions_wndproc);
+        register_class(PIN_CLASS, pin_wndproc);
+        register_class(HINT_CLASS, hint_wndproc);
+        register_class(ZOOM_CLASS, zoom_wndproc);
+        register_class(ACTIONS_CLASS, actions_wndproc);
 
         let raw_state = Box::into_raw(Box::new(PinState {
             image,
@@ -157,29 +155,21 @@ pub fn show(image: Frame) -> Result<()> {
 
 /// 注册窗口类。
 unsafe fn register_class(
-    hinstance: HINSTANCE,
     name: PCWSTR,
     wndproc: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
 ) {
     unsafe {
-        let mut window_class: WNDCLASSW = std::mem::zeroed();
-        window_class.lpfnWndProc = Some(wndproc);
-        window_class.hInstance = hinstance;
-        window_class.lpszClassName = name;
-        let _ = RegisterClassW(&window_class);
+        crate::ui::kit::window::register_class(
+            name,
+            wndproc,
+            windows::Win32::UI::WindowsAndMessaging::WNDCLASS_STYLES(0),
+        );
     }
 }
 
 /// 取得贴图窗口的可变状态。
 unsafe fn state(hwnd: HWND) -> Option<&'static mut PinState> {
-    unsafe {
-        let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PinState;
-        if pointer.is_null() {
-            None
-        } else {
-            Some(&mut *pointer)
-        }
-    }
+    unsafe { crate::ui::kit::window::state(hwnd) }
 }
 
 /// 生成带阴影的分层窗口位图并提交。
@@ -341,10 +331,7 @@ unsafe extern "system" fn pin_wndproc(
         match message {
             // 步骤 1：创建时保存状态；绘制完全由分层窗口负责。
             WM_NCCREATE => {
-                let create = lparam.0 as *const CREATESTRUCTW;
-                if !create.is_null() {
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*create).lpCreateParams as isize);
-                }
+                crate::ui::kit::window::bind_from_create(hwnd, lparam);
                 DefWindowProcW(hwnd, message, wparam, lparam)
             }
             WM_ERASEBKGND => LRESULT(1),
@@ -465,10 +452,7 @@ unsafe extern "system" fn pin_wndproc(
             }
             WM_DESTROY => {
                 // 先清除 USERDATA，避免子窗口销毁时回访主状态。
-                let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PinState;
-                if !pointer.is_null() {
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                    let state = Box::from_raw(pointer);
+                if let Some(state) = crate::ui::kit::window::take_state::<PinState>(hwnd) {
                     if IsWindow(Some(state.hint)).as_bool() {
                         let _ = DestroyWindow(state.hint);
                     }
@@ -584,7 +568,13 @@ unsafe extern "system" fn zoom_wndproc(
                 let length = GetWindowTextW(hwnd, &mut buffer);
                 let text = String::from_utf16_lossy(&buffer[..length.max(0) as usize]);
                 let font = HFONT(GetStockObject(DEFAULT_GUI_FONT).0);
-                kit_text::draw_text_centered(hdc, &text, &mut rect, font, COLORREF(0x00FF_FFFF));
+                kit_text::draw_text_centered(
+                    hdc,
+                    &text,
+                    &mut rect,
+                    font,
+                    crate::ui::kit::theme::OVERLAY_WHITE,
+                );
                 let _ = EndPaint(hwnd, &paint);
                 LRESULT(0)
             }
@@ -827,10 +817,7 @@ unsafe extern "system" fn actions_wndproc(
     unsafe {
         match message {
             WM_NCCREATE => {
-                let create = lparam.0 as *const CREATESTRUCTW;
-                if !create.is_null() {
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*create).lpCreateParams as isize);
-                }
+                crate::ui::kit::window::bind_from_create(hwnd, lparam);
                 DefWindowProcW(hwnd, message, wparam, lparam)
             }
             WM_ERASEBKGND => LRESULT(1),
@@ -891,10 +878,8 @@ unsafe extern "system" fn actions_wndproc(
                 LRESULT(0)
             }
             WM_DESTROY => {
-                let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ActionsState;
-                if !pointer.is_null() {
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                    drop(Box::from_raw(pointer));
+                if let Some(state) = crate::ui::kit::window::take_state::<ActionsState>(hwnd) {
+                    drop(state);
                 }
                 LRESULT(0)
             }
@@ -905,14 +890,7 @@ unsafe extern "system" fn actions_wndproc(
 
 /// 取得操作条窗口的可变状态。
 unsafe fn actions_state(hwnd: HWND) -> Option<&'static mut ActionsState> {
-    unsafe {
-        let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut ActionsState;
-        if pointer.is_null() {
-            None
-        } else {
-            Some(&mut *pointer)
-        }
-    }
+    unsafe { crate::ui::kit::window::state(hwnd) }
 }
 
 /// 提示条窗口的消息处理。
@@ -938,7 +916,13 @@ unsafe extern "system" fn hint_wndproc(
                 let length = GetWindowTextW(hwnd, &mut buffer);
                 let text = String::from_utf16_lossy(&buffer[..length.max(0) as usize]);
                 let font = HFONT(GetStockObject(DEFAULT_GUI_FONT).0);
-                kit_text::draw_text_centered(hdc, &text, &mut rect, font, COLORREF(0x00FF_FFFF));
+                kit_text::draw_text_centered(
+                    hdc,
+                    &text,
+                    &mut rect,
+                    font,
+                    crate::ui::kit::theme::OVERLAY_WHITE,
+                );
                 let _ = EndPaint(hwnd, &paint);
                 LRESULT(0)
             }

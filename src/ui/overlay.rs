@@ -21,14 +21,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, GWLP_USERDATA, GetForegroundWindow, GetMessageW, GetWindowLongPtrW,
-    GetWindowThreadProcessId, HCURSOR, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IDC_SIZEALL,
-    IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IsWindow, KillTimer, LoadCursorW, MSG,
-    PostThreadMessageW, RegisterClassW, SW_SHOW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_APP, WM_CREATE,
-    WM_CTLCOLOREDIT, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HCURSOR,
+    HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
+    IDC_SIZENWSE, IDC_SIZEWE, IsWindow, KillTimer, LoadCursorW, MSG, PostThreadMessageW, SW_SHOW,
+    SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+    TranslateMessage, WM_APP, WM_CREATE, WM_CTLCOLOREDIT, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_TIMER, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -97,12 +96,11 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
     unsafe {
         // 步骤 2：注册窗口类并创建置顶遮罩窗口。
         let hinstance = HINSTANCE(GetModuleHandleW(None)?.0);
-        let mut window_class: WNDCLASSW = std::mem::zeroed();
-        window_class.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
-        window_class.lpfnWndProc = Some(overlay_wndproc);
-        window_class.hInstance = hinstance;
-        window_class.lpszClassName = CLASS_NAME;
-        let _ = RegisterClassW(&window_class);
+        crate::ui::kit::window::register_class(
+            CLASS_NAME,
+            overlay_wndproc,
+            CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
+        );
 
         let cross = LoadCursorW(None, IDC_CROSS).unwrap_or(HCURSOR(null_mut()));
         let arrow = LoadCursorW(None, IDC_ARROW).unwrap_or(HCURSOR(null_mut()));
@@ -774,7 +772,7 @@ impl Overlay {
                 text,
                 &mut text_rect,
                 self.font,
-                windows::Win32::Foundation::COLORREF(0x00FF_FFFF),
+                crate::ui::kit::theme::OVERLAY_WHITE,
             );
         }
     }
@@ -822,7 +820,7 @@ impl Overlay {
                 &text,
                 &mut text_rect,
                 self.font,
-                windows::Win32::Foundation::COLORREF(0x00FF_FFFF),
+                crate::ui::kit::theme::OVERLAY_WHITE,
             );
         }
     }
@@ -1571,14 +1569,7 @@ fn hiword(value: isize) -> i32 {
 
 /// 取窗口绑定的 Overlay 状态（仅窗口存续期内有效）。
 unsafe fn state(hwnd: HWND) -> Option<&'static mut Overlay> {
-    unsafe {
-        let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Overlay;
-        if pointer.is_null() {
-            None
-        } else {
-            Some(&mut *pointer)
-        }
-    }
+    unsafe { crate::ui::kit::window::state(hwnd) }
 }
 
 /// 遮罩窗口过程：转发绘制、输入与文字编辑消息。
@@ -1593,12 +1584,7 @@ unsafe extern "system" fn overlay_wndproc(
         // 步骤 1：创建时把 Overlay 指针绑定到 GWLP_USERDATA。
         match message {
             WM_NCCREATE => {
-                let create =
-                    lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
-                if !create.is_null() {
-                    let pointer = (*create).lpCreateParams as *mut Overlay;
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, pointer as isize);
-                }
+                crate::ui::kit::window::bind_from_create(hwnd, lparam);
                 DefWindowProcW(hwnd, message, wparam, lparam)
             }
             WM_CREATE => {

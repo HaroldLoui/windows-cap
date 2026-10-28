@@ -18,6 +18,13 @@ pub fn wide(text: &str) -> Vec<u16> {
 pub unsafe fn create_font(scale: f32) -> HFONT {
     unsafe {
         let height = -((15.0 * scale).round() as i32).max(10);
+        create_font_with_height(height)
+    }
+}
+
+/// 按像素高度创建界面字体；`height` 为负值表示字符高度。
+pub unsafe fn create_font_with_height(height: i32) -> HFONT {
+    unsafe {
         let font = CreateFontW(
             height,
             0,

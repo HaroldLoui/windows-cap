@@ -15,15 +15,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     UnregisterHotKey, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, CreateWindowExW, DLGC_WANTALLKEYS, DefWindowProcW, GWLP_USERDATA,
-    GetWindowLongPtrW, RegisterClassW, SetWindowLongPtrW, ShowWindow, WNDCLASSW, WS_CHILD,
+    CS_DBLCLKS, CreateWindowExW, DLGC_WANTALLKEYS, DefWindowProcW, ShowWindow, WS_CHILD,
     WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
 use crate::ui::kit::dpi::s;
 use crate::ui::kit::text::wide;
-use crate::ui::kit::theme::{ACCENT_COLORREF, WINDOW_TEXT};
+use crate::ui::kit::theme::{ACCENT_COLORREF, WINDOW_BG, WINDOW_TEXT};
 use crate::ui::kit::widgets::field;
 
 const CLASS_NAME: PCWSTR = w!("window_cap_hotkey_field");
@@ -53,13 +52,7 @@ pub unsafe fn create(
 ) -> HWND {
     unsafe {
         REGISTER.call_once(|| {
-            let hinstance = HINSTANCE(GetModuleHandleW(None).map(|m| m.0).unwrap_or(null_mut()));
-            let mut class: WNDCLASSW = std::mem::zeroed();
-            class.style = CS_DBLCLKS;
-            class.lpfnWndProc = Some(hotkey_wndproc);
-            class.hInstance = hinstance;
-            class.lpszClassName = CLASS_NAME;
-            let _ = RegisterClassW(&class);
+            crate::ui::kit::window::register_class(CLASS_NAME, hotkey_wndproc, CS_DBLCLKS);
         });
         let hinstance = HINSTANCE(GetModuleHandleW(None).map(|m| m.0).unwrap_or(null_mut()));
         let state = Box::into_raw(Box::new(HotkeyState {
@@ -111,14 +104,7 @@ pub unsafe fn value(hwnd: HWND) -> String {
 }
 
 unsafe fn state(hwnd: HWND) -> Option<&'static mut HotkeyState> {
-    unsafe {
-        let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut HotkeyState;
-        if pointer.is_null() {
-            None
-        } else {
-            Some(&mut *pointer)
-        }
-    }
+    unsafe { crate::ui::kit::window::state(hwnd) }
 }
 
 unsafe fn redraw(hwnd: HWND) {
@@ -233,11 +219,7 @@ unsafe extern "system" fn hotkey_wndproc(
     unsafe {
         match message {
             windows::Win32::UI::WindowsAndMessaging::WM_NCCREATE => {
-                let create =
-                    lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW;
-                if !create.is_null() {
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*create).lpCreateParams as isize);
-                }
+                crate::ui::kit::window::bind_from_create(hwnd, lparam);
                 DefWindowProcW(hwnd, message, wparam, lparam)
             }
             windows::Win32::UI::WindowsAndMessaging::WM_PAINT => {
@@ -270,10 +252,7 @@ unsafe extern "system" fn hotkey_wndproc(
             }
             windows::Win32::UI::WindowsAndMessaging::WM_ERASEBKGND => LRESULT(1),
             windows::Win32::UI::WindowsAndMessaging::WM_DESTROY => {
-                let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut HotkeyState;
-                if !pointer.is_null() {
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                    let state = Box::from_raw(pointer);
+                if let Some(state) = crate::ui::kit::window::take_state::<HotkeyState>(hwnd) {
                     if state.registered.is_some() {
                         let _ = UnregisterHotKey(Some(hwnd), 1);
                     }
@@ -335,9 +314,7 @@ unsafe fn paint(hwnd: HWND) {
         let hdc = BeginPaint(hwnd, &mut paint);
         let mut rect = RECT::default();
         let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rect);
-        let background = windows::Win32::Graphics::Gdi::CreateSolidBrush(
-            windows::Win32::Foundation::COLORREF(0x0020_1B1B),
-        );
+        let background = windows::Win32::Graphics::Gdi::CreateSolidBrush(WINDOW_BG);
         let _ = FillRect(hdc, &rect, background);
         let _ = DeleteObject(HGDIOBJ(background.0));
 
