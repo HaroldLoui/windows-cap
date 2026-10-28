@@ -10,9 +10,8 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint,
     CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, CreateSolidBrush, DEFAULT_GUI_FONT,
-    DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteDC,
-    DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetStockObject, HGDIOBJ, InvalidateRect,
-    PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetStockObject, HFONT,
+    HGDIOBJ, InvalidateRect, PAINTSTRUCT, ReleaseDC, SelectObject, SetWindowRgn,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -35,6 +34,7 @@ use windows::core::{PCWSTR, w};
 
 use crate::capture::Frame;
 use crate::output::{clipboard, files};
+use crate::ui::kit::text as kit_text;
 use crate::ui::kit::text::wide;
 use crate::ui::toolbar::{PIN_ACTIONS_HEIGHT, PIN_ACTIONS_WIDTH, paint_pin_actions};
 use crate::util::error::Result;
@@ -573,27 +573,18 @@ unsafe extern "system" fn zoom_wndproc(
                 let hdc = BeginPaint(hwnd, &mut paint);
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
-                let background = CreateSolidBrush(COLORREF(0x0020_2020));
+                let background = CreateSolidBrush(crate::ui::kit::theme::OVERLAY_DARK);
                 FillRect(hdc, &rect, background);
                 let _ = DeleteObject(HGDIOBJ(background.0));
-                let border = CreateSolidBrush(COLORREF(0x0080_8080));
+                let border = CreateSolidBrush(crate::ui::kit::theme::OVERLAY_BORDER);
                 let _ = windows::Win32::Graphics::Gdi::FrameRect(hdc, &rect, border);
                 let _ = DeleteObject(HGDIOBJ(border.0));
 
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, COLORREF(0x00FF_FFFF));
-                let old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
                 let mut buffer = [0u16; 32];
                 let length = GetWindowTextW(hwnd, &mut buffer);
                 let text = String::from_utf16_lossy(&buffer[..length.max(0) as usize]);
-                let mut wide_text = wide(&text);
-                DrawTextW(
-                    hdc,
-                    &mut wide_text,
-                    &mut rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-                );
-                SelectObject(hdc, old_font);
+                let font = HFONT(GetStockObject(DEFAULT_GUI_FONT).0);
+                kit_text::draw_text_centered(hdc, &text, &mut rect, font, COLORREF(0x00FF_FFFF));
                 let _ = EndPaint(hwnd, &paint);
                 LRESULT(0)
             }
@@ -682,20 +673,12 @@ unsafe fn show_hint(pin: HWND, placement: HintPlacement, text: &str, duration: u
         let content_width = (pin_rect.right - pin_rect.left - SHADOW * 2).max(1);
 
         let measure_dc = GetDC(None);
-        let mut measured = RECT::default();
-        let mut measured_text = wide(text);
-        let old_font = SelectObject(measure_dc, GetStockObject(DEFAULT_GUI_FONT));
-        DrawTextW(
-            measure_dc,
-            &mut measured_text,
-            &mut measured,
-            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
-        );
-        SelectObject(measure_dc, old_font);
+        let font = HFONT(GetStockObject(DEFAULT_GUI_FONT).0);
+        let (text_width, text_height) = kit_text::text_size(measure_dc, text, font);
         let _ = ReleaseDC(None, measure_dc);
 
-        let width = (measured.right - measured.left) + 24;
-        let height = (measured.bottom - measured.top) + 14;
+        let width = text_width + 24;
+        let height = text_height + 14;
         let (mut x, mut y) = match placement {
             HintPlacement::Right => (content_left + content_width + 12, content_top),
             HintPlacement::Above => (
@@ -947,24 +930,15 @@ unsafe extern "system" fn hint_wndproc(
                 let hdc = BeginPaint(hwnd, &mut paint);
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
-                let background = CreateSolidBrush(COLORREF(0x0020_2020));
+                let background = CreateSolidBrush(crate::ui::kit::theme::OVERLAY_DARK);
                 FillRect(hdc, &rect, background);
                 let _ = DeleteObject(HGDIOBJ(background.0));
 
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, COLORREF(0x00FF_FFFF));
-                let old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
                 let mut buffer = [0u16; 256];
                 let length = GetWindowTextW(hwnd, &mut buffer);
                 let text = String::from_utf16_lossy(&buffer[..length.max(0) as usize]);
-                let mut text = wide(&text);
-                DrawTextW(
-                    hdc,
-                    &mut text,
-                    &mut rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-                );
-                SelectObject(hdc, old_font);
+                let font = HFONT(GetStockObject(DEFAULT_GUI_FONT).0);
+                kit_text::draw_text_centered(hdc, &text, &mut rect, font, COLORREF(0x00FF_FFFF));
                 let _ = EndPaint(hwnd, &paint);
                 LRESULT(0)
             }

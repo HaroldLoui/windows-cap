@@ -8,10 +8,9 @@ use std::time::Instant;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_TRANSITIONS_FORCEDISABLED, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, FrameRect, GetStockObject, HBRUSH,
-    HDC, HFONT, HGDIOBJ, InvalidateRect, NULL_BRUSH, PAINTSTRUCT, SRCCOPY, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT, UpdateWindow,
+    BeginPaint, BitBlt, CreateSolidBrush, DeleteObject, EndPaint, FillRect, FrameRect,
+    GetStockObject, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect, NULL_BRUSH, PAINTSTRUCT, SRCCOPY,
+    SetBkMode, SetTextColor, TRANSPARENT, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -37,6 +36,7 @@ use crate::annotate::{Document, Point, Shape, ShapeKind, render};
 use crate::capture::{Frame, RectI, VirtualScreen};
 use crate::platform::dib::Dib;
 use crate::ui::kit::dpi::scale_from_hwnd;
+use crate::ui::kit::text as kit_text;
 use crate::ui::kit::text::create_font;
 use crate::ui::selection::{EndResult, HANDLE_HIT_TOLERANCE, Handle, SelectionState};
 use crate::ui::text_edit::{TextEditor, WM_TEXT_CANCEL, WM_TEXT_COMMIT};
@@ -146,8 +146,8 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             size_all,
             font: HFONT(null_mut()),
             accent: CreateSolidBrush(crate::ui::kit::theme::ACCENT_COLORREF),
-            white: CreateSolidBrush(COLORREF(0x00FF_FFFF)),
-            dark: CreateSolidBrush(COLORREF(0x0020_2020)),
+            white: CreateSolidBrush(crate::ui::kit::theme::OVERLAY_WHITE),
+            dark: CreateSolidBrush(crate::ui::kit::theme::OVERLAY_DARK),
             ui_scale: 1.0,
             started: Instant::now(),
             first_paint_ms: None,
@@ -752,23 +752,11 @@ impl Overlay {
         center_y: i32,
     ) {
         unsafe {
-            let mut wide: Vec<u16> = text.encode_utf16().collect();
-            let old_font = SelectObject(hdc, HGDIOBJ(self.font.0));
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, COLORREF(0x00FF_FFFF));
-
-            let mut measure = windows::Win32::Foundation::RECT::default();
-            DrawTextW(
-                hdc,
-                &mut wide,
-                &mut measure,
-                DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX,
-            );
-
+            let (text_width, text_height) = kit_text::text_size(hdc, text, self.font);
             let padding_x = (10.0 * self.ui_scale) as i32;
             let padding_y = (5.0 * self.ui_scale) as i32;
-            let width = (measure.right - measure.left).max(0) + padding_x * 2;
-            let height = (measure.bottom - measure.top).max(0) + padding_y * 2;
+            let width = text_width + padding_x * 2;
+            let height = text_height + padding_y * 2;
             let left = (center_x - width / 2).clamp(0, (self.area.width - width).max(0));
             let top = (center_y - height / 2).clamp(0, (self.area.height - height).max(0));
 
@@ -780,15 +768,14 @@ impl Overlay {
             };
             let _ = FillRect(hdc, &rect, self.dark);
             let _ = FrameRect(hdc, &rect, self.accent);
-
             let mut text_rect = rect;
-            DrawTextW(
+            kit_text::draw_text_centered(
                 hdc,
-                &mut wide,
+                text,
                 &mut text_rect,
-                DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+                self.font,
+                windows::Win32::Foundation::COLORREF(0x00FF_FFFF),
             );
-            SelectObject(hdc, old_font);
         }
     }
 
@@ -806,22 +793,11 @@ impl Overlay {
         }
 
         unsafe {
-            let mut wide: Vec<u16> = text.encode_utf16().collect();
-            let old_font = SelectObject(hdc, HGDIOBJ(self.font.0));
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, COLORREF(0x00FF_FFFF));
-
-            let mut measure = windows::Win32::Foundation::RECT::default();
-            DrawTextW(
-                hdc,
-                &mut wide,
-                &mut measure,
-                DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX,
-            );
+            let (text_width, text_height) = kit_text::text_size(hdc, &text, self.font);
             let padding_x = (9.0 * self.ui_scale).round() as i32;
             let padding_y = (4.0 * self.ui_scale).round() as i32;
-            let width = (measure.right - measure.left).max(0) + padding_x * 2;
-            let height = (measure.bottom - measure.top).max(0) + padding_y * 2;
+            let width = text_width + padding_x * 2;
+            let height = text_height + padding_y * 2;
 
             let gap = (6.0 * self.ui_scale).round() as i32;
             let mut x = toolbar.rect.x + (toolbar.rect.width - width) / 2;
@@ -841,13 +817,13 @@ impl Overlay {
             let _ = FillRect(hdc, &rect, self.dark);
             let _ = FrameRect(hdc, &rect, self.accent);
             let mut text_rect = rect;
-            DrawTextW(
+            kit_text::draw_text_centered(
                 hdc,
-                &mut wide,
+                &text,
                 &mut text_rect,
-                DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+                self.font,
+                windows::Win32::Foundation::COLORREF(0x00FF_FFFF),
             );
-            SelectObject(hdc, old_font);
         }
     }
 
