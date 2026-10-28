@@ -1,7 +1,7 @@
 # 设置页重设计与 UI Kit 拆分方案
 
 > 日期：2026-10-28
-> 状态：方案已定，未实施
+> 状态：方案已定，评审通过（2026-10-28），待实施
 > 前置调研：[设置页UI调研.md](设置页UI调研.md)（结论仍有效：不引入 windows-reactor / egui，坚持纯 Win32 + GDI+）
 
 ## 1. 背景
@@ -36,6 +36,21 @@
 | 热键交互 | 做"按键捕获"式录制器 | ShareX/Snipaste 标配；免手输；捕获逻辑任何方案都得写，纯自绘交互自由度最高 |
 | 输入框策略 | 保留原生 `EDIT`，只自绘边框/底板 | IME/选中/复制等文本框最难的部分由原生承担，零输入体验回归；复用 text_edit.rs 已验证的叠加模式 |
 | 文本输入 vs 自绘边界 | 难的用原生，好看才自绘 | 见 §3.2 组件策略表 |
+
+### 2.1 评审补充（2026-10-28）
+
+| 事项 | 结论 |
+|---|---|
+| 保存后联动常驻实例 | **要做**：保存成功后若检测到常驻实例，通过单实例 IPC 通知其重新加载配置/热键，避免“改完设置没生效” |
+| 热键录制规则 | **只接受组合键**：至少 1 个修饰键（Ctrl/Alt/Shift/Win）+ 1 个主键；只按修饰键保持录制态，单主键不提交 |
+| 热键冲突校验 | 捕获后立即尝试 `RegisterHotKey` 试注册；被占用则提示并保持录制态，不能等到保存时才报错 |
+| 复制/保存设置 | 已在 `733eb13` 改为工具栏按动作执行（`OutputAction::Copy` / `Save`），`OutputConfig` 已删除 `copy_to_clipboard` / `save_file`；设置页**不再有这两个复选框**，输出卡只保留保存目录与延迟 |
+| Win10 兼容 | `DWMWA_CAPTION_COLOR` / `DWMWA_WINDOW_CORNER_PREFERENCE` 仅 Win11 生效；调用失败时静默回退到现有暗色标题栏，不能依赖圆角/同色一定存在 |
+| EDIT 圆角底板 | `WM_CTLCOLOREDIT` 只能给方形背景；要透出圆角卡片，必须像 `text_edit.rs` 一样子类化 EDIT，在 `WM_ERASEBKGND` 里从父窗口卡片裁剪贴图。这是验收项，不是“改个颜色” |
+| 独立 `--settings` | 单独进程打开设置时，常驻实例的热键仍生效；应在录制期间暂停/转发，或至少检测常驻实例并改用 IPC 在常驻进程内打开设置 |
+| 主题色 | 收编颜色时顺手修 overlay 的 accent 色：当前 `COLORREF(0x00FF9B2E)` 按 BGR 解释会偏蓝，统一为工具栏橙色并验证选区边框 |
+| DPI | 增加 `WM_DPICHANGED` 处理：窗口跨显示器移动时重算字体、控件位置和窗口尺寸 |
+| 引用方式 | 文档后续用函数/符号名，不写易漂移的行号 |
 
 ## 3. 方案总览
 
@@ -80,11 +95,14 @@
 
 配套改动：
 
-1. **DWM**：`DWMWA_WINDOW_CORNER_PREFERENCE`（Win11 圆角窗口）+ `DWMWA_CAPTION_COLOR`（标题栏与背景同色），各一行；
-2. **输入框**：父窗口 GDI+ 画 8px 圆角底板 + hover 边框 + focus 橙色强调边框，透明背景 `EDIT` 叠加其上（保留 IME/选中/复制）；
-3. **复选框 → 自绘开关（toggle）**：顺带修复破图；
-4. **布局**：按内容计算窗口高度，删除 `BASE_HEIGHT` 拍脑袋常量；
-5. **hover 态**：owner 按钮补 `WM_MOUSEMOVE` + `TrackMouseEvent` hover。
+1. **DWM**：`DWMWA_WINDOW_CORNER_PREFERENCE`（Win11 圆角窗口）+ `DWMWA_CAPTION_COLOR`（标题栏与背景同色）；Win10 或调用失败时静默回退到现有暗色标题栏；
+2. **输入框**：父窗口 GDI+ 画 8px 圆角底板 + hover 边框 + focus 橙色强调边框，透明背景 `EDIT` 叠加其上（保留 IME/选中/复制）；透明需子类化 EDIT 处理 `WM_ERASEBKGND`，不能只靠 `WM_CTLCOLOREDIT`；
+3. **开关**：自绘 toggle 替代原生复选框（同时修复部分主题下的破图）；
+4. **布局**：按内容计算窗口高度，删除 `BASE_HEIGHT` 拍脑袋常量；窗口尺寸随 DPI 变化重算；
+5. **hover 态**：owner 按钮补 `WM_MOUSEMOVE` + `TrackMouseEvent` hover；
+6. **热键录制**：只接受“修饰键 + 主键”的组合，捕获后立即试注册。
+
+> 注意：`733eb13` 后复制/保存是工具栏动作，设置页不再提供“截图后复制/保存”复选框，输出卡只有保存目录与延迟截图。
 
 ### 3.2 组件策略（难的用原生，好看才自绘）
 
@@ -139,32 +157,40 @@ src/ui/kit/
 
 **明确留在业务侧、不下沉的内容**：
 
-- `Tool` / `ToolbarAction` / `draw_icon`（图标绘制与业务枚举硬耦合，toolbar.rs:817-1001；后续如需下沉须先参数化成 IconId，第一期不碰）；
+- `Tool` / `ToolbarAction` / `draw_icon`（图标绘制与业务枚举硬耦合；后续如需下沉须先参数化成 IconId，第一期不碰）；
 - `Toolbar::layout` / `ToolbarState`（含 can_undo/can_pin 等业务状态）；
 - `overlay_wndproc` / `apply_action` / `preview_shape` / `export_image` 等遮罩业务；
 - `save_settings` / `browse_folder`（配置读写与目录选择）；
 - `selection.rs`（已是纯逻辑，暂不动）；
 - `text_edit.rs`（带 WM_TEXT_* 业务协议的控件，暂不动）。
 
-## 4. 实施计划（两期）
+## 4. 实施计划（三步走）
 
-### 第一期：建 kit + 设置页重设计（先出用户可见价值）
+### 4.1 第一步（1a）：建 kit 基础件，先不搬 shapes
 
 | 步骤 | 内容 | 涉及文件 |
 |---|---|---|
-| 1 | 建 `src/ui/kit/`，**平移**去重：wide×3→1、create_font×2→1、DPI 4 种→1、颜色归一、GDI+ 初始化归一、shapes 平移 | 新增 `src/ui/kit/*`；改动 pin.rs / settings.rs / tray.rs / overlay.rs / toolbar.rs / annotate/render.rs（仅删本地实现换调用） |
-| 2 | 新写 card / field / toggle / hotkey 四个 widget | 新增 `src/ui/kit/widgets/*` |
-| 3 | 设置页重写：卡片布局 + 热键录制器 + toggle + Win11 DWM 圆角/同色标题栏 + hover 态，全部走 kit；删除 draw_owner_button | 重写 `src/ui/settings.rs` |
-| 4 | 验证：cargo fmt / clippy（-D warnings）/ test 全绿；手动过一遍热键录制、目录浏览、自启开关、保存校验 | — |
+| 1 | 建 `src/ui/kit/`：`theme`、`text`（wide/create_font/居中文字）、`dpi`（s/scale_from_hwnd）、`window`（state/register_class）、`gdiplus`（init/Graphics 守卫） | 新增 `src/ui/kit/*` |
+| 2 | 纯替换去重：wide×3→1、create_font×2→1、DPI 4 种→1、主题色常量归一、GDI+ 初始化归一 | pin.rs / settings.rs / tray.rs / overlay.rs / toolbar.rs / annotate/render.rs |
+| 3 | 验证：编译、clippy、test；确认遮罩/工具栏/贴图行为不变 | — |
 
-第一期风险控制：步骤 1 是纯平移（对外行为不变，编译器兜底）；步骤 3 集中在 settings.rs 单文件重写，不触碰遮罩/贴图路径。
+风险控制：这一步**不搬 `shapes.rs`、不碰绘制逻辑**，只做样板去重，便于独立回滚。顺带修 overlay accent 的 BGR 色值问题。
 
-### 第二期（可选，独立提交）：存量窗口迁移
+### 4.2 第二步（1b）：kit widgets + 设置页重写
+
+| 步骤 | 内容 | 涉及文件 |
+|---|---|---|
+| 4 | 新写 `widgets/button.rs`、`card.rs`、`field.rs`、`toggle.rs`、`hotkey.rs` | 新增 `src/ui/kit/widgets/*` |
+| 5 | 设置页重写：卡片布局 + 热键录制器 + toggle + DWM 圆角/同色标题栏（Win10 回退）+ hover 态；删除旧 `draw_owner_button` | 重写 `src/ui/settings.rs` |
+| 6 | 常驻联动：保存成功后通过单实例 IPC 通知常驻实例重新加载配置/热键；独立 `--settings` 检测到常驻实例时优先转交 | `single_instance.rs` / `hotkey.rs` / `settings.rs` |
+| 7 | 验证：热键录制（组合键/仅修饰键/Esc/冲突）、目录浏览、自启开关、保存校验、100%/150% DPI、IME、复制/保存动作回归 | — |
+
+### 4.3 第三步（第二期，可选）：存量窗口迁移
 
 | 步骤 | 内容 |
 |---|---|
-| 5 | `toolbar.rs` 绘制改用 `kit::shapes` / `kit::theme`（`Toolbar::paint` 内部换实现，对外 API 不变） |
-| 6 | `overlay.rs` / `pin.rs` 的 `draw_chip` / `draw_tooltip` / 文字样板逐步换 kit 调用 |
+| 8 | `toolbar.rs` 绘制改用 `kit::shapes` / `kit::theme`（`Toolbar::paint` 内部换实现，对外 API 不变） |
+| 9 | `overlay.rs` / `pin.rs` 的 `draw_chip` / `draw_tooltip` / 文字样板逐步换 kit 调用 |
 
 第二期动 5000 行的大头，独立做、独立测、独立提交。
 
@@ -174,10 +200,18 @@ src/ui/kit/
 触发条件（任一）：出现第二个消费者项目，或 kit 需要独立发版测试。
 迁移操作：目录平移为 `crates/win-kit`，`pub(crate)` → `pub`，加 workspace 与独立 Cargo.toml（windows features 仅需 `Foundation / Gdi / GdiPlus / WindowsAndMessaging / LibraryLoader / HiDpi`，Ime 仅 text_edit 需要故不带）。
 
-## 6. 工期估计
+## 6. 工期估计（评审后上调）
 
 | 期 | 内容 | 估计 |
 |---|---|---|
-| 第一期步骤 1 | kit 建立 + 存量去重平移 | 0.5 天 |
-| 第一期步骤 2-3 | 四 widget + 设置页重写 | 0.5–1 天 |
-| 第二期 | toolbar/overlay/pin 迁移 | 1 天（可选，另行安排） |
+| 1a | kit 基础件 + 存量样板去重 | 1–1.5 天 |
+| 1b | 四 widget + 设置页重写 + 常驻联动 | 1–1.5 天 |
+| 第二期 | toolbar/overlay/pin 迁移 | 1–2 天（可选，另行安排） |
+
+## 7. 与 `733eb13` 的关系
+
+`733eb13` 已把复制/保存改为工具栏动作：`Ctrl+C`/Copy 只复制，`Ctrl+S`/Save 只落盘；`OutputConfig` 删除 `copy_to_clipboard` / `save_file`。因此：
+
+- 本文 §3.1 设置页不包含“截图后复制/保存”复选框；
+- 设置页 `save_settings` 只更新热键、保存目录、延迟、开机自启；
+- 设计/实现时不要再引用已删除的配置字段。
