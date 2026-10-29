@@ -32,7 +32,7 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 ### 下载
 
 - GitHub Releases：<https://github.com/HaroldLoui/windows-cap/releases>
-- 当前 Beta：`v0.10.0-beta.6` 便携 zip，解压后运行 `window-cap.exe`。
+- 当前 Beta：`v0.10.0-beta12` 便携 zip，解压后运行 `window-cap.exe`。
 
 ### 从源码构建
 
