@@ -4,7 +4,7 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 
 仓库：<https://github.com/HaroldLoui/windows-cap>
 
-当前版本：**0.10.0-beta.12**（Beta）。支持 Windows 10/11，单显示器 100% DPI 已验证；4K/多屏/混合 DPI 仍在兼容性测试中。
+当前版本：**0.10.0**（首个正式版）。支持 Windows 10/11；28 项单元测试与静态检查通过；整虚拟桌面采集已在双屏混合 DPI 环境验证（2560×1600 @150% + 2560×1440 @100%，5120×1600 / 70 ms）；遮罩/标注/贴图主流程回归基于单屏 96 DPI 环境；4K/RDP/HDR 仍在兼容性测试中。
 
 ![工具栏](docs/images/toolbar.png)
 
@@ -32,7 +32,7 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 ### 下载
 
 - GitHub Releases：<https://github.com/HaroldLoui/windows-cap/releases>
-- 当前 Beta：`v0.10.0-beta12` 便携 zip，解压后运行 `window-cap.exe`。
+- 当前版本：[`v0.10.0`](https://github.com/HaroldLoui/windows-cap/releases/tag/v0.10.0) 便携 zip，解压后运行 `window-cap.exe`。
 
 ### 从源码构建
 
@@ -105,6 +105,8 @@ delay_ms = 0
 ## 文档
 
 - [开发文档](docs/开发文档.md)：模块职责、功能 → 代码索引、关键流程
+- [更新日志](CHANGELOG.md)
+- [已知问题](docs/known-issues.md)
 - [实施进度](docs/progress.md)
 - [待办清单](docs/待办.md)
 - [Beta 回归报告](docs/Beta回归.md)
@@ -132,7 +134,9 @@ src/output      PNG / 剪贴板
 ## 状态与路线
 
 - ✅ 基础截图、标注、工具栏、文字、贴图、常驻
-- ⏳ 4K/多屏/混合 DPI/RDP/HDR 兼容性（无硬件，暂缓）
+- ✅ 双屏混合 DPI 环境整虚拟桌面采集（v0.10.0，5120×1600 / 70 ms）
+- ⏳ 4K/RDP/HDR/独占全屏兼容性（无目标环境，暂缓）
+- ⏳ 跨屏 UI 交互回归（双屏硬件环境下补跑）
 - ⏳ 截长图（方案评估完成）
 - ⏳ MSI 安装包 / 自动更新（等 GitHub 发布后）
 
