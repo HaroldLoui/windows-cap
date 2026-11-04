@@ -285,6 +285,8 @@
 | 2026-10-28 | UI kit 收尾 | `v0.10.0-beta12` | `9dbefcb` | window 注册/状态 helper、字体/文字/颜色样板收口 |
 | 2026-10-29 | Beta 回归 | `v0.10.0-beta12` | `4a646d3` | 自动化+主流程通过，便携包 559KB，SHA256 12C056…D57E9 |
 | 2026-10-29 | GitHub Release | `v0.10.0-beta12` | `40bbf2d` | 便携 zip 发布，SHA256 12C056…D57E9 已校验 |
+| 2026-11-04 | 正式版文档 | `v0.10.0` | `3b3d76b` | 版本号 0.10.0、CHANGELOG、known-issues、兼容性补双屏环境 |
+| 2026-11-04 | GitHub Release | `v0.10.0` | `3b3d76b` | 便携 zip 559KB 发布，SHA256 3E69CC…1EEA7 已校验 |
 
 ## 后续（P6 / 收尾）
 

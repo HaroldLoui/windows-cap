@@ -19,7 +19,7 @@
 - `cargo fmt --check`：通过
 - 整虚拟桌面采集：5120×1600，GDI，70.34 ms；主/副屏几何正确，无镜像/错位
 - `--soak 200`：15.8 s 完成，GDI +0、USER +0、内存 +0.0 MB（39.1 MB）
-- 便携包：`window-cap-0.10.0-portable.zip`（572,473 字节，4 个文件）
+- 便携包：`window-cap-0.10.0-portable.zip`（572,473 字节，4 个文件），SHA256 `3e69cc57f02108050409599b4d26fa0621f4518e92157afa2f21a86cdfe1eea7`
 
 ### 说明
 
