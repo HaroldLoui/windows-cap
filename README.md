@@ -4,7 +4,7 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 
 仓库：<https://github.com/HaroldLoui/windows-cap>
 
-当前版本：**0.10.0**（首个正式版）。支持 Windows 10/11；28 项单元测试与静态检查通过；整虚拟桌面采集已在双屏混合 DPI 环境验证（2560×1600 @150% + 2560×1440 @100%，5120×1600 / 70 ms）；遮罩/标注/贴图主流程回归基于单屏 96 DPI 环境；4K/RDP/HDR 仍在兼容性测试中。
+当前版本：**0.10.1**（双屏交互修复）。支持 Windows 10/11；33 项单元测试与静态检查通过；整虚拟桌面采集已在双屏混合 DPI 环境验证（2560×1600 @150% + 2560×1440 @100%，5120×1600 / 70 ms）；双屏遮罩交互（工具栏归属屏、跨屏拖动、初始提示标签）已完成人工回归；4K/RDP/HDR 仍在兼容性测试中。
 
 ![工具栏](docs/images/toolbar.png)
 
@@ -32,8 +32,8 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 ### 下载
 
 - GitHub Releases：<https://github.com/HaroldLoui/windows-cap/releases>
-- 当前版本：[`v0.10.0`](https://github.com/HaroldLoui/windows-cap/releases/tag/v0.10.0) 便携 zip，解压后运行 `window-cap.exe`。
-- 便携包 SHA256：`3e69cc57f02108050409599b4d26fa0621f4518e92157afa2f21a86cdfe1eea7`
+- 当前版本：[`v0.10.1`](https://github.com/HaroldLoui/windows-cap/releases/tag/v0.10.1) 便携 zip，解压后运行 `window-cap.exe`。
+- 便携包 SHA256：`5497ed6453f1a43e16bf6e3f0fe4295a76f0d70ef8472c107064fce983e1efc0`
 
 ### 从源码构建
 

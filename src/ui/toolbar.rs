@@ -302,6 +302,25 @@ impl Toolbar {
         }
     }
 
+    /// 布局所用的 DPI 缩放系数。
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// 把布局结果从「所属屏幕的局部坐标」平移到遮罩客户区坐标。
+    pub fn translate(&mut self, dx: i32, dy: i32) {
+        self.rect.x += dx;
+        self.rect.y += dy;
+        self.row1_divider += dx;
+        self.row2_divider += dx;
+        self.row1_y += dy;
+        self.row2_y += dy;
+        for button in &mut self.buttons {
+            button.rect.x += dx;
+            button.rect.y += dy;
+        }
+    }
+
     /// 返回坐标处命中的动作。
     pub fn hit(&self, x: i32, y: i32) -> Option<ToolbarAction> {
         self.buttons
@@ -1008,6 +1027,30 @@ mod tests {
         assert!(
             toolbar.rect.y + toolbar.rect.height <= 700,
             "应放在选区上方"
+        );
+    }
+
+    #[test]
+    fn translate_keeps_panel_inside_its_monitor() {
+        let host = VirtualScreen {
+            x: 2560,
+            y: 160,
+            width: 2560,
+            height: 1440,
+        };
+        let mut toolbar = Toolbar::layout(RectI::new(2600, 200, 400, 300), host, 1.0, &state());
+        toolbar.translate(host.x, host.y);
+
+        assert!(toolbar.rect.x >= host.x);
+        assert!(toolbar.rect.x + toolbar.rect.width <= host.x + host.width);
+        assert!(toolbar.rect.y >= host.y);
+        assert!(toolbar.rect.y + toolbar.rect.height <= host.y + host.height);
+
+        // 命中测试使用客户区坐标：平移后仍应命中第一个工具按钮。
+        let button = toolbar.buttons[0].rect;
+        assert_eq!(
+            toolbar.hit(button.x + button.width / 2, button.y + button.height / 2),
+            Some(ToolbarAction::Tool(TOOLS[0]))
         );
     }
 

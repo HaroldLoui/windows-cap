@@ -48,6 +48,11 @@ impl VirtualScreen {
         self.y + self.height
     }
 
+    /// 转成屏幕坐标矩形。
+    pub fn as_rect(&self) -> RectI {
+        RectI::new(self.x, self.y, self.width, self.height)
+    }
+
     /// 判断矩形是否完全落在虚拟桌面内。
     pub fn contains(&self, rect: RectI) -> bool {
         rect.width > 0

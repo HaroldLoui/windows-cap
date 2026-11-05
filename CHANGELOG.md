@@ -2,6 +2,35 @@
 
 版本号遵循语义化版本；预发布阶段使用 `-beta.N`。更早的迭代细节见 [docs/progress.md](docs/progress.md)。
 
+## [0.10.1] - 2026-11-05
+
+双屏 / 混合 DPI 交互修复（办公机 2560×1600 @150% + 2560×1440 @100%，副屏偏移 (2560, 160)）。
+
+### 修复
+
+- 工具栏按选区所属屏（重叠面积最大）布局，并换算回遮罩客户区坐标：修复副屏框选时工具栏画回主屏、尺寸偏小、点击命中偏移，以及跨屏拖动时“莫名变小”
+- 工具栏改为选区确认（鼠标抬起）后才出现，即使空白处拖出选区也不会提前出现，行为与微信截图一致
+- 遮罩刚出现时的“拖拽选择区域”提示标签按鼠标所在屏居中，并限制在该屏内，不再压在屏幕缝隙或落进副屏上方的无显示区域
+- 文字标注与界面字体按所在屏 DPI 创建并缓存，跨屏字号一致；退出时统一释放字体句柄
+- 选区手柄命中容差仍按客户区像素（不随 DPI 缩放），保持原有手感
+
+### 重构
+
+- `drag` / `text_drag` 合并为 `Drag` 枚举；7 个鼠标形状 `HCURSOR` 字段合并为 `Pointer` 枚举（`Pointer::handle()` 内 `LoadCursorW`）
+- 新增 `VirtualScreen::as_rect`、`SelectionState::confirmed_rect`、`Toolbar::scale` / `Toolbar::translate`、`largest_overlap_monitor`
+
+### 验证
+
+- `cargo test`：33 passed / 0 failed（新增 5 项：`confirmed_rect`、`overlap_area`、`host_monitor`、`translate`、`largest_overlap_monitor`）
+- `cargo clippy --all-targets -- -D warnings`：无警告；`cargo fmt --check`：通过
+- `--overlay-selftest 5`：5/5 次确认（预热 3 次），平均 176.9 ms/次；GDI 15→15、USER 5→5、内存 45.5→45.5 MB
+- 办公机双屏人工回归：工具栏归属屏正确、跨屏拖动尺寸稳定、初始提示标签落在鼠标所在屏
+- 便携包：`window-cap-0.10.1-portable.zip`（591,503 字节），SHA256 `5497ed6453f1a43e16bf6e3f0fe4295a76f0d70ef8472c107064fce983e1efc0`
+
+### 说明
+
+- 4K / RDP / HDR / 三屏以上 / 运行中 DPI 变化未验证，见 [known-issues](docs/known-issues.md)
+
 ## [0.10.0] - 2026-11-04
 
 首个正式版（GA）。功能与 `v0.10.0-beta.12` 一致，本次发布补齐发版文档与环境验证。

@@ -5,7 +5,7 @@ use std::mem::size_of;
 use std::ptr::null_mut;
 use std::time::Instant;
 
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_TRANSITIONS_FORCEDISABLED, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateSolidBrush, DeleteObject, EndPaint, FillRect, FrameRect,
@@ -21,8 +21,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HCURSOR,
-    HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
+    DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
+    HCURSOR, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
     IDC_SIZENWSE, IDC_SIZEWE, IsWindow, KillTimer, LoadCursorW, MSG, PostThreadMessageW, SW_SHOW,
     SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
     TranslateMessage, WM_APP, WM_CREATE, WM_CTLCOLOREDIT, WM_ERASEBKGND, WM_KEYDOWN,
@@ -32,9 +32,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, w};
 
 use crate::annotate::{Document, Point, Shape, ShapeKind, render};
-use crate::capture::{Frame, RectI, VirtualScreen};
+use crate::capture::{Frame, MonitorInfo, RectI, VirtualScreen, monitors};
 use crate::platform::dib::Dib;
-use crate::ui::kit::dpi::scale_from_hwnd;
+use crate::ui::kit::dpi::{scale_from_dpi, scale_from_hwnd};
 use crate::ui::kit::text as kit_text;
 use crate::ui::kit::text::create_font;
 use crate::ui::selection::{EndResult, HANDLE_HIT_TOLERANCE, Handle, SelectionState};
@@ -102,25 +102,20 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
         );
 
-        let cross = LoadCursorW(None, IDC_CROSS).unwrap_or(HCURSOR(null_mut()));
-        let arrow = LoadCursorW(None, IDC_ARROW).unwrap_or(HCURSOR(null_mut()));
-        let size_nwse = LoadCursorW(None, IDC_SIZENWSE).unwrap_or(HCURSOR(null_mut()));
-        let size_nesw = LoadCursorW(None, IDC_SIZENESW).unwrap_or(HCURSOR(null_mut()));
-        let size_ns = LoadCursorW(None, IDC_SIZENS).unwrap_or(HCURSOR(null_mut()));
-        let size_we = LoadCursorW(None, IDC_SIZEWE).unwrap_or(HCURSOR(null_mut()));
-        let size_all = LoadCursorW(None, IDC_SIZEALL).unwrap_or(HCURSOR(null_mut()));
+        let monitors = monitors();
+        let (cursor_x, cursor_y) = cursor_position();
+        let hint_monitor = host_monitor(&monitors, cursor_x, cursor_y, area);
         ::log::debug!(
-            "overlay cursors: cross={:?} arrow={:?} nwse={:?} all={:?}",
-            cross,
-            arrow,
-            size_nwse,
-            size_all
+            "overlay monitors={} hint={hint_monitor:?} cursor=({cursor_x}, {cursor_y})",
+            monitors.len()
         );
         let previous_foreground = GetForegroundWindow();
 
         let mut overlay = Box::new(Overlay {
             hwnd: HWND(null_mut()),
             area,
+            monitors,
+            hint_monitor,
             allow_pin: options.allow_pin,
             frame,
             dim,
@@ -132,17 +127,11 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             width: 4.0,
             drag: None,
             text_editor: None,
-            text_drag: None,
+            text_scale: 1.0,
             toolbar: None,
             result: None,
-            cross,
-            arrow,
-            size_nwse,
-            size_nesw,
-            size_ns,
-            size_we,
-            size_all,
-            font: HFONT(null_mut()),
+            pointer: Pointer::Cross,
+            fonts: Vec::new(),
             accent: CreateSolidBrush(crate::ui::kit::theme::ACCENT_COLORREF),
             white: CreateSolidBrush(crate::ui::kit::theme::OVERLAY_WHITE),
             dark: CreateSolidBrush(crate::ui::kit::theme::OVERLAY_DARK),
@@ -153,7 +142,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             paint_total_ms: 0.0,
             toolbar_hover: None,
             tooltip_action: None,
-            cursor: (area.x, area.y),
+            cursor: (cursor_x, cursor_y),
             previous_foreground,
         });
 
@@ -181,7 +170,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
         // 步骤 3：初始化 DPI、字体与工具栏，显示并聚焦窗口。
         overlay.hwnd = hwnd;
         overlay.ui_scale = scale_from_hwnd(hwnd);
-        overlay.font = create_font(overlay.ui_scale);
+        overlay.fonts = build_fonts(&overlay.monitors, overlay.ui_scale);
         overlay.refresh_toolbar();
 
         // 遮罩自身禁用 IME，避免按键变为 VK_PROCESSKEY；文字编辑框会另建上下文。
@@ -207,7 +196,7 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
         let _ = ShowWindow(hwnd, SW_SHOW);
         force_foreground(hwnd);
         let _ = SetFocus(Some(hwnd));
-        let _ = SetCursor(Some(cross));
+        let _ = SetCursor(Some(overlay.pointer.handle()));
         let _ = UpdateWindow(hwnd);
 
         if options.scripted.is_some() {
@@ -278,10 +267,48 @@ enum TextDrag {
     },
 }
 
+/// 正在进行的鼠标拖拽：标注拖拽与文字框拖拽互斥。
+enum Drag {
+    Shape(ShapeDrag),
+    Text(TextDrag),
+}
+
+/// 遮罩会用到的系统鼠标指针形状。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pointer {
+    Cross,
+    Arrow,
+    SizeNwse,
+    SizeNesw,
+    SizeNs,
+    SizeWe,
+    SizeAll,
+}
+
+impl Pointer {
+    /// 加载对应的系统光标句柄；系统内部共享，无需释放。
+    fn handle(self) -> HCURSOR {
+        let id = match self {
+            Self::Cross => IDC_CROSS,
+            Self::Arrow => IDC_ARROW,
+            Self::SizeNwse => IDC_SIZENWSE,
+            Self::SizeNesw => IDC_SIZENESW,
+            Self::SizeNs => IDC_SIZENS,
+            Self::SizeWe => IDC_SIZEWE,
+            Self::SizeAll => IDC_SIZEALL,
+        };
+        unsafe { LoadCursorW(None, id).unwrap_or(HCURSOR(null_mut())) }
+    }
+}
+
 /// 遮罩窗口的运行时状态与 GDI 资源。
 struct Overlay {
     hwnd: HWND,
     area: VirtualScreen,
+    /// 各显示器的矩形与 DPI，创建时快照一次。
+    monitors: Vec<MonitorInfo>,
+    /// 提示标签所在显示器（鼠标起始位置）。
+    hint_monitor: VirtualScreen,
     allow_pin: bool,
     frame: Frame,
     dim: Dib,
@@ -291,21 +318,17 @@ struct Overlay {
     tool: Tool,
     color: u32,
     width: f32,
-    drag: Option<ShapeDrag>,
+    drag: Option<Drag>,
     text_editor: Option<TextEditor>,
-    text_drag: Option<TextDrag>,
+    /// 打开文字输入框时的缩放系数。
+    text_scale: f32,
     toolbar: Option<Toolbar>,
     toolbar_hover: Option<ToolbarAction>,
     tooltip_action: Option<ToolbarAction>,
     result: Option<OverlayResult>,
-    cross: HCURSOR,
-    arrow: HCURSOR,
-    size_nwse: HCURSOR,
-    size_nesw: HCURSOR,
-    size_ns: HCURSOR,
-    size_we: HCURSOR,
-    size_all: HCURSOR,
-    font: HFONT,
+    pointer: Pointer,
+    /// 每个显示器 DPI 对应的界面字体。
+    fonts: Vec<(f32, HFONT)>,
     accent: HBRUSH,
     white: HBRUSH,
     dark: HBRUSH,
@@ -332,6 +355,51 @@ impl Overlay {
             rect.width,
             rect.height,
         )
+    }
+
+    /// 遮罩客户区矩形转屏幕坐标。
+    fn to_screen(&self, rect: RectI) -> RectI {
+        RectI::new(
+            rect.x + self.area.x,
+            rect.y + self.area.y,
+            rect.width,
+            rect.height,
+        )
+    }
+
+    /// 屏幕坐标处显示器的缩放系数。
+    fn scale_at(&self, x: i32, y: i32) -> f32 {
+        self.monitors
+            .iter()
+            .find(|monitor| inside(monitor.rect.as_rect(), (x, y)))
+            .map(|monitor| scale_from_dpi(monitor.dpi_x.max(monitor.dpi_y)))
+            .unwrap_or(self.ui_scale)
+    }
+
+    /// 矩形归属的显示器（重叠面积最大者）及其缩放系数。
+    fn host_of(&self, rect: RectI) -> (VirtualScreen, f32) {
+        largest_overlap_monitor(&self.monitors, rect)
+            .map(|monitor| {
+                (
+                    monitor.rect,
+                    scale_from_dpi(monitor.dpi_x.max(monitor.dpi_y)),
+                )
+            })
+            .unwrap_or((self.area, self.ui_scale))
+    }
+
+    /// 取与缩放系数最接近的界面字体。
+    fn font_for(&self, scale: f32) -> HFONT {
+        self.fonts
+            .iter()
+            .min_by(|(left, _), (right, _)| {
+                (left - scale)
+                    .abs()
+                    .partial_cmp(&(right - scale).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(_, font)| *font)
+            .unwrap_or(HFONT(null_mut()))
     }
 
     /// 文档中是否已有标注。
@@ -394,14 +462,11 @@ impl Overlay {
         }
     }
 
-    /// 按当前选区、工具与撤销状态重排工具栏。
+    /// 按已确认的选区、工具与撤销状态重排工具栏。
     fn refresh_toolbar(&mut self) {
-        let layout_rect = if self.selection.rect().is_some() {
-            self.selection.current_rect()
-        } else {
-            None
-        };
-        self.toolbar = layout_rect.map(|rect| {
+        let mut toolbar = None;
+        if let Some(rect) = self.selection.confirmed_rect() {
+            let (host, scale) = self.host_of(rect);
             let state = ToolbarState {
                 tool: self.tool,
                 color: self.color,
@@ -418,8 +483,13 @@ impl Overlay {
                     .unwrap_or(false),
                 can_pin: self.allow_pin,
             };
-            Toolbar::layout(rect, self.area, self.ui_scale, &state)
-        });
+            toolbar = Some(Toolbar::layout(rect, host, scale, &state));
+            if let Some(layout) = toolbar.as_mut() {
+                // 布局按所属屏幕的局部坐标计算，这里换回遮罩客户区坐标。
+                layout.translate(host.x - self.area.x, host.y - self.area.y);
+            }
+        }
+        self.toolbar = toolbar;
         self.toolbar_hover = None;
     }
 
@@ -500,7 +570,7 @@ impl Overlay {
 
     /// 关闭文字输入框并把焦点交回遮罩。
     fn close_text_editor(&mut self) {
-        self.text_drag = None;
+        self.clear_text_drag();
         if let Some(editor) = self.text_editor.take() {
             drop(editor);
             unsafe {
@@ -509,10 +579,17 @@ impl Overlay {
         }
     }
 
+    /// 清除文字框拖拽状态，保留标注拖拽。
+    fn clear_text_drag(&mut self) {
+        if matches!(self.drag, Some(Drag::Text(_))) {
+            self.drag = None;
+        }
+    }
+
     /// 关闭输入框，并把非空文字提交为标注。
     fn commit_text(&mut self) {
         // 步骤 1：读取文字、锚点与宽度后销毁输入框。
-        self.text_drag = None;
+        self.clear_text_drag();
         let Some(editor) = self.text_editor.take() else {
             return;
         };
@@ -533,7 +610,7 @@ impl Overlay {
                 ShapeKind::Text {
                     pos: (position.0, position.1),
                     text,
-                    size: 24.0 * self.ui_scale,
+                    size: 24.0 * self.text_scale.max(1.0),
                     max_width,
                 },
                 self.color,
@@ -609,7 +686,7 @@ impl Overlay {
             }
 
             // 步骤 4：叠加正在拖拽的标注预览。
-            if let Some(drag) = &self.drag
+            if let Some(Drag::Shape(drag)) = &self.drag
                 && let Some(shape) = self.preview_shape(drag)
             {
                 match &shape.kind {
@@ -633,7 +710,8 @@ impl Overlay {
             // 步骤 5：绘制选区边框、工具栏、提示与文字输入框。
             self.draw_chrome(hdc, current);
             if let Some(toolbar) = &self.toolbar {
-                toolbar.paint(hdc, self.font, self.toolbar_hover);
+                let font = self.font_for(toolbar.scale());
+                toolbar.paint(hdc, font, self.toolbar_hover);
             }
             self.draw_tooltip(hdc);
             self.draw_text_frame(hdc);
@@ -684,7 +762,8 @@ impl Overlay {
     unsafe fn draw_chrome(&self, hdc: windows::Win32::Graphics::Gdi::HDC, rect: RectI) {
         unsafe {
             let local = self.to_local(rect);
-            let thickness = ((2.0 * self.ui_scale).round() as i32).max(1);
+            let (host, scale) = self.host_of(rect);
+            let thickness = ((2.0 * scale).round() as i32).max(1);
 
             fill(hdc, local.x, local.y, local.width, thickness, self.accent);
             fill(
@@ -706,7 +785,7 @@ impl Overlay {
             );
 
             if !self.has_shapes() {
-                let half = ((3.5 * self.ui_scale).round() as i32).max(2);
+                let half = ((3.5 * scale).round() as i32).max(2);
                 for handle in Handle::ALL {
                     let (x, y) = handle.position(rect);
                     let (x, y) = (x - self.area.x, y - self.area.y);
@@ -723,40 +802,57 @@ impl Overlay {
 
             let label = format!("{} × {}", rect.width, rect.height);
             let center_x = local.x + local.width / 2;
-            let label_y = if local.y > (40.0 * self.ui_scale) as i32 {
-                local.y - ((18.0 * self.ui_scale) as i32)
+            let label_y = if local.y > (40.0 * scale) as i32 {
+                local.y - ((18.0 * scale) as i32)
             } else {
-                local.y + local.height + ((18.0 * self.ui_scale) as i32)
+                local.y + local.height + ((18.0 * scale) as i32)
             };
-            self.draw_chip(hdc, &label, center_x, label_y);
+            let bounds = self.to_local(host.as_rect());
+            self.draw_chip(hdc, &label, center_x, label_y, scale, bounds);
         }
     }
 
-    /// 绘制空选区时的操作提示。
+    /// 绘制空选区时的操作提示：贴在鼠标起始所在显示器的顶部中间。
     unsafe fn draw_hint(&self, hdc: windows::Win32::Graphics::Gdi::HDC) {
         unsafe {
-            let center_x = self.area.width / 2;
-            let y = ((30.0 * self.ui_scale) as i32).max(20);
-            self.draw_chip(hdc, "拖拽选择区域    Enter 复制    Esc 取消", center_x, y);
+            let host = self.hint_monitor;
+            let center = (host.x + host.width / 2, host.y + host.height / 2);
+            let scale = self.scale_at(center.0, center.1);
+            let center_x = center.0 - self.area.x;
+            let y = host.y + ((30.0 * scale) as i32).max(20) - self.area.y;
+            let bounds = self.to_local(host.as_rect());
+            self.draw_chip(
+                hdc,
+                "拖拽选择区域    Enter 复制    Esc 取消",
+                center_x,
+                y,
+                scale,
+                bounds,
+            );
         }
     }
 
-    /// 在指定中心绘制带背景的提示文字。
+    /// 在指定中心绘制带背景的提示文字，并夹在 `bounds` 内。
     unsafe fn draw_chip(
         &self,
         hdc: windows::Win32::Graphics::Gdi::HDC,
         text: &str,
         center_x: i32,
         center_y: i32,
+        scale: f32,
+        bounds: RectI,
     ) {
         unsafe {
-            let (text_width, text_height) = kit_text::text_size(hdc, text, self.font);
-            let padding_x = (10.0 * self.ui_scale) as i32;
-            let padding_y = (5.0 * self.ui_scale) as i32;
+            let font = self.font_for(scale);
+            let (text_width, text_height) = kit_text::text_size(hdc, text, font);
+            let padding_x = (10.0 * scale) as i32;
+            let padding_y = (5.0 * scale) as i32;
             let width = text_width + padding_x * 2;
             let height = text_height + padding_y * 2;
-            let left = (center_x - width / 2).clamp(0, (self.area.width - width).max(0));
-            let top = (center_y - height / 2).clamp(0, (self.area.height - height).max(0));
+            let left = (center_x - width / 2)
+                .clamp(bounds.x, (bounds.x + bounds.width - width).max(bounds.x));
+            let top = (center_y - height / 2)
+                .clamp(bounds.y, (bounds.y + bounds.height - height).max(bounds.y));
 
             let rect = windows::Win32::Foundation::RECT {
                 left,
@@ -771,7 +867,7 @@ impl Overlay {
                 hdc,
                 text,
                 &mut text_rect,
-                self.font,
+                font,
                 crate::ui::kit::theme::OVERLAY_WHITE,
             );
         }
@@ -791,20 +887,30 @@ impl Overlay {
         }
 
         unsafe {
-            let (text_width, text_height) = kit_text::text_size(hdc, &text, self.font);
-            let padding_x = (9.0 * self.ui_scale).round() as i32;
-            let padding_y = (4.0 * self.ui_scale).round() as i32;
+            let scale = toolbar.scale();
+            let font = self.font_for(scale);
+            let (text_width, text_height) = kit_text::text_size(hdc, &text, font);
+            let padding_x = (9.0 * scale).round() as i32;
+            let padding_y = (4.0 * scale).round() as i32;
             let width = text_width + padding_x * 2;
             let height = text_height + padding_y * 2;
 
-            let gap = (6.0 * self.ui_scale).round() as i32;
+            let bounds = self.to_local(self.host_of(self.to_screen(toolbar.rect)).0.as_rect());
+            let margin = (4.0 * scale).round() as i32;
+            let gap = (6.0 * scale).round() as i32;
             let mut x = toolbar.rect.x + (toolbar.rect.width - width) / 2;
             let mut y = toolbar.rect.y + toolbar.rect.height + gap;
-            if y + height > self.area.height - 4 {
+            if y + height > bounds.y + bounds.height - margin {
                 y = toolbar.rect.y - height - gap;
             }
-            x = x.clamp(4, (self.area.width - width - 4).max(4));
-            y = y.clamp(4, (self.area.height - height - 4).max(4));
+            x = x.clamp(
+                bounds.x + margin,
+                (bounds.x + bounds.width - width - margin).max(bounds.x + margin),
+            );
+            y = y.clamp(
+                bounds.y + margin,
+                (bounds.y + bounds.height - height - margin).max(bounds.y + margin),
+            );
 
             let rect = windows::Win32::Foundation::RECT {
                 left: x,
@@ -819,7 +925,7 @@ impl Overlay {
                 hdc,
                 &text,
                 &mut text_rect,
-                self.font,
+                font,
                 crate::ui::kit::theme::OVERLAY_WHITE,
             );
         }
@@ -957,14 +1063,16 @@ impl Overlay {
 
         if self.tool == Tool::Text {
             let client = (screen.0 - self.area.x, screen.1 - self.area.y);
+            let scale = self.scale_at(screen.0, screen.1);
+            self.text_scale = scale;
             // 步骤 1：文字工具先合成当前画面，作为透明输入框的背景。
             self.compose();
             match TextEditor::open(
                 self.hwnd,
                 client,
                 position,
-                self.ui_scale,
-                24.0 * self.ui_scale,
+                scale,
+                24.0 * scale,
                 &self.composed,
             ) {
                 Ok(editor) => {
@@ -982,11 +1090,11 @@ impl Overlay {
             return;
         }
 
-        self.drag = Some(ShapeDrag {
+        self.drag = Some(Drag::Shape(ShapeDrag {
             start: position,
             current: position,
             points: vec![position],
-        });
+        }));
         ::log::debug!("start drag tool={:?} at {position:?}", self.tool);
         unsafe {
             SetCapture(self.hwnd);
@@ -999,7 +1107,7 @@ impl Overlay {
         let Some(rect) = self.selection.rect() else {
             return;
         };
-        let Some(drag) = self.drag.as_mut() else {
+        let Some(Drag::Shape(drag)) = self.drag.as_mut() else {
             return;
         };
 
@@ -1018,7 +1126,7 @@ impl Overlay {
 
     /// 结束拖拽并把预览标注提交到文档。
     fn finish_drag(&mut self) {
-        let Some(drag) = self.drag.take() else {
+        let Some(Drag::Shape(drag)) = self.drag.take() else {
             return;
         };
         unsafe {
@@ -1092,20 +1200,20 @@ impl Overlay {
             let frame = RectI::new(rect.x - 4, rect.y - 4, rect.width + 8, rect.height + 8);
             let grip = RectI::new(rect.x + rect.width + 2, rect.y + rect.height + 2, 12, 12);
             if inside(grip, client) {
-                self.text_drag = Some(TextDrag::Resize {
+                self.drag = Some(Drag::Text(TextDrag::Resize {
                     start: client,
                     origin: (rect.width, rect.height),
-                });
+                }));
                 unsafe {
                     SetCapture(self.hwnd);
                 }
                 return;
             }
             if inside(frame, client) && !inside(rect, client) {
-                self.text_drag = Some(TextDrag::Move {
+                self.drag = Some(Drag::Text(TextDrag::Move {
                     start: client,
                     origin: (rect.x, rect.y),
-                });
+                }));
                 unsafe {
                     SetCapture(self.hwnd);
                 }
@@ -1141,6 +1249,7 @@ impl Overlay {
                     unsafe {
                         SetCapture(self.hwnd);
                     }
+                    self.refresh_toolbar();
                     self.invalidate();
                 }
                 return;
@@ -1151,6 +1260,7 @@ impl Overlay {
                 unsafe {
                     SetCapture(self.hwnd);
                 }
+                self.refresh_toolbar();
                 self.invalidate();
             }
             return;
@@ -1160,6 +1270,7 @@ impl Overlay {
         unsafe {
             SetCapture(self.hwnd);
         }
+        self.refresh_toolbar();
         self.invalidate();
     }
 
@@ -1169,10 +1280,14 @@ impl Overlay {
         let mut needs_paint = false;
 
         // 步骤 1：文字框拖拽优先，处理移动或缩放。
-        if let Some(drag) = self.text_drag {
+        let text_drag = match &self.drag {
+            Some(Drag::Text(drag)) => Some(*drag),
+            _ => None,
+        };
+        if let Some(drag) = text_drag {
             let client = (screen.0 - self.area.x, screen.1 - self.area.y);
             let area = self.area;
-            let scale = self.ui_scale;
+            let scale = self.text_scale.max(1.0);
             if let Some(editor) = self.text_editor.as_mut() {
                 match drag {
                     TextDrag::Move { start, origin } => {
@@ -1201,7 +1316,7 @@ impl Overlay {
         }
 
         // 步骤 2：更新标注拖拽或选区框选。
-        if self.drag.is_some() {
+        if matches!(self.drag, Some(Drag::Shape(_))) {
             self.update_drag(screen);
             needs_paint = true;
         } else if self.selection.is_active() {
@@ -1238,7 +1353,8 @@ impl Overlay {
     /// 处理左键释放：结束文字拖拽、标注或框选。
     fn on_mouse_up(&mut self, screen: (i32, i32)) {
         // 步骤 1：结束文字框拖拽，并把焦点还给 EDIT。
-        if self.text_drag.take().is_some() {
+        if matches!(self.drag, Some(Drag::Text(_))) {
+            self.drag = None;
             unsafe {
                 let _ = ReleaseCapture();
             }
@@ -1252,7 +1368,7 @@ impl Overlay {
         }
 
         // 步骤 2：落下标注，或结束选区框选并创建文档。
-        if self.drag.is_some() {
+        if matches!(self.drag, Some(Drag::Shape(_))) {
             self.update_drag(screen);
             self.finish_drag();
             return;
@@ -1375,16 +1491,14 @@ impl Overlay {
             let rect = editor.client_rect();
             let frame = RectI::new(rect.x - 4, rect.y - 4, rect.width + 8, rect.height + 8);
             let grip = RectI::new(rect.x + rect.width + 2, rect.y + rect.height + 2, 12, 12);
-            let cursor = if inside(grip, client) {
-                self.size_nwse
+            let pointer = if inside(grip, client) {
+                Pointer::SizeNwse
             } else if inside(frame, client) && !inside(rect, client) {
-                self.size_all
+                Pointer::SizeAll
             } else {
-                self.arrow
+                Pointer::Arrow
             };
-            unsafe {
-                let _ = SetCursor(Some(cursor));
-            }
+            self.set_pointer(pointer);
             return;
         }
 
@@ -1394,8 +1508,8 @@ impl Overlay {
             .map(|toolbar| toolbar.hit(client.0, client.1).is_some())
             .unwrap_or(false);
 
-        let cursor = if over_toolbar {
-            self.arrow
+        let pointer = if over_toolbar {
+            Pointer::Arrow
         } else {
             match self.selection.rect() {
                 Some(rect) if !self.has_shapes() => {
@@ -1408,34 +1522,39 @@ impl Overlay {
                         )
                     });
                     match handle {
-                        Some(Handle::NorthWest | Handle::SouthEast) => self.size_nwse,
-                        Some(Handle::NorthEast | Handle::SouthWest) => self.size_nesw,
-                        Some(Handle::North | Handle::South) => self.size_ns,
-                        Some(Handle::East | Handle::West) => self.size_we,
+                        Some(Handle::NorthWest | Handle::SouthEast) => Pointer::SizeNwse,
+                        Some(Handle::NorthEast | Handle::SouthWest) => Pointer::SizeNesw,
+                        Some(Handle::North | Handle::South) => Pointer::SizeNs,
+                        Some(Handle::East | Handle::West) => Pointer::SizeWe,
                         None => {
                             if self.selection.is_moving()
                                 || (self.tool == Tool::Select && inside(rect, self.cursor))
                             {
-                                self.size_all
+                                Pointer::SizeAll
                             } else {
-                                self.cross
+                                Pointer::Cross
                             }
                         }
                     }
                 }
                 Some(rect) if self.has_shapes() => {
                     if inside(rect, self.cursor) {
-                        self.cross
+                        Pointer::Cross
                     } else {
-                        self.arrow
+                        Pointer::Arrow
                     }
                 }
-                _ => self.cross,
+                _ => Pointer::Cross,
             }
         };
 
+        self.set_pointer(pointer);
+    }
+
+    /// 应用鼠标指针形状。
+    fn set_pointer(&self, pointer: Pointer) {
         unsafe {
-            let _ = SetCursor(Some(cursor));
+            let _ = SetCursor(Some(pointer.handle()));
         }
     }
 
@@ -1451,13 +1570,81 @@ impl Drop for Overlay {
     fn drop(&mut self) {
         // 字体与画刷由 Overlay 持有，统一在此释放。
         unsafe {
-            if !self.font.0.is_null() {
-                let _ = DeleteObject(HGDIOBJ(self.font.0));
+            for (_, font) in &self.fonts {
+                if !font.0.is_null() {
+                    let _ = DeleteObject(HGDIOBJ(font.0));
+                }
             }
             for brush in [self.accent, self.white, self.dark] {
                 let _ = DeleteObject(HGDIOBJ(brush.0));
             }
         }
+    }
+}
+
+/// 读取当前鼠标的屏幕坐标；失败时退回虚拟桌面左上角。
+fn cursor_position() -> (i32, i32) {
+    let mut point = POINT::default();
+    unsafe {
+        if GetCursorPos(&mut point).is_ok() {
+            (point.x, point.y)
+        } else {
+            let area = VirtualScreen::current();
+            (area.x, area.y)
+        }
+    }
+}
+
+/// 坐标所在显示器；不在任何显示器内时优先主屏，再退回整块虚拟桌面。
+fn host_monitor(
+    monitors: &[MonitorInfo],
+    x: i32,
+    y: i32,
+    fallback: VirtualScreen,
+) -> VirtualScreen {
+    monitors
+        .iter()
+        .find(|monitor| inside(monitor.rect.as_rect(), (x, y)))
+        .or_else(|| monitors.iter().find(|monitor| monitor.primary))
+        .map(|monitor| monitor.rect)
+        .unwrap_or(fallback)
+}
+
+/// 两个矩形的重叠面积（物理像素）。
+fn overlap_area(left: RectI, right: RectI) -> i64 {
+    let width = (left.x + left.width).min(right.x + right.width) - left.x.max(right.x);
+    let height = (left.y + left.height).min(right.y + right.height) - left.y.max(right.y);
+    if width <= 0 || height <= 0 {
+        0
+    } else {
+        i64::from(width) * i64::from(height)
+    }
+}
+
+/// 与矩形重叠面积最大的显示器；完全不重叠时为 None。
+fn largest_overlap_monitor(monitors: &[MonitorInfo], rect: RectI) -> Option<&MonitorInfo> {
+    monitors
+        .iter()
+        .map(|monitor| (monitor, overlap_area(rect, monitor.rect.as_rect())))
+        .filter(|(_, overlap)| *overlap > 0)
+        .max_by_key(|(_, overlap)| *overlap)
+        .map(|(monitor, _)| monitor)
+}
+
+/// 按各显示器 DPI 预建界面字体，避免跨屏时字号不一致。
+unsafe fn build_fonts(monitors: &[MonitorInfo], fallback: f32) -> Vec<(f32, HFONT)> {
+    let mut scales: Vec<f32> = monitors
+        .iter()
+        .map(|monitor| scale_from_dpi(monitor.dpi_x.max(monitor.dpi_y)))
+        .collect();
+    scales.push(fallback.max(1.0));
+    scales.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    scales.dedup_by(|left, right| (*left - *right).abs() < 0.01);
+    unsafe {
+        scales
+            .into_iter()
+            .map(|scale| (scale, create_font(scale)))
+            .collect()
     }
 }
 
@@ -1682,5 +1869,78 @@ unsafe extern "system" fn overlay_wndproc(
             WM_NCHITTEST => LRESULT(HTCLIENT as isize),
             _ => DefWindowProcW(hwnd, message, wparam, lparam),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn monitor(x: i32, y: i32, width: i32, height: i32, primary: bool, dpi: u32) -> MonitorInfo {
+        MonitorInfo {
+            device: format!("monitor-{x}-{y}"),
+            rect: VirtualScreen {
+                x,
+                y,
+                width,
+                height,
+            },
+            primary,
+            dpi_x: dpi,
+            dpi_y: dpi,
+        }
+    }
+
+    #[test]
+    fn overlap_area_handles_intersection_and_touching() {
+        let left = RectI::new(0, 0, 100, 100);
+        assert_eq!(overlap_area(left, RectI::new(50, 50, 100, 100)), 2500);
+        assert_eq!(overlap_area(left, RectI::new(100, 0, 100, 100)), 0);
+        assert_eq!(overlap_area(left, RectI::new(-200, -200, 100, 100)), 0);
+    }
+
+    #[test]
+    fn host_monitor_prefers_pointer_monitor_and_falls_back() {
+        let primary = monitor(0, 0, 2560, 1600, true, 144);
+        let secondary = monitor(2560, 160, 2560, 1440, false, 96);
+        let monitors = vec![primary.clone(), secondary.clone()];
+        let fallback = VirtualScreen {
+            x: 0,
+            y: 0,
+            width: 5120,
+            height: 1600,
+        };
+
+        assert_eq!(host_monitor(&monitors, 3000, 500, fallback), secondary.rect);
+        // 副屏上方 160px 的空隙不在任何显示器内，退回主屏。
+        assert_eq!(host_monitor(&monitors, 3000, 20, fallback), primary.rect);
+        assert_eq!(host_monitor(&[], 10, 10, fallback), fallback);
+    }
+
+    #[test]
+    fn largest_overlap_monitor_picks_bigger_side_of_cross_screen_selection() {
+        let primary = monitor(0, 0, 2560, 1600, true, 144);
+        let secondary = monitor(2560, 160, 2560, 1440, false, 96);
+        let monitors = vec![primary.clone(), secondary.clone()];
+
+        // 整块虚拟桌面：主屏面积更大，工具栏归主屏。
+        let full = RectI::new(0, 0, 5120, 1600);
+        assert_eq!(
+            largest_overlap_monitor(&monitors, full).unwrap().rect,
+            primary.rect
+        );
+
+        // 大部分落在副屏：归副屏。
+        let mostly_secondary = RectI::new(2000, 200, 3000, 1200);
+        assert_eq!(
+            largest_overlap_monitor(&monitors, mostly_secondary)
+                .unwrap()
+                .rect,
+            secondary.rect
+        );
+
+        // 完全不在任何显示器内（例如只覆盖副屏上方的空隙）时没有归属。
+        let gap = RectI::new(3000, 0, 400, 100);
+        assert!(largest_overlap_monitor(&monitors, gap).is_none());
     }
 }

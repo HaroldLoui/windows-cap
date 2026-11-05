@@ -113,6 +113,14 @@ impl SelectionState {
         self.current_rect()
     }
 
+    /// 返回已确认的选区；框选过程中返回 None，工具栏只在确认后出现。
+    pub fn confirmed_rect(&self) -> Option<RectI> {
+        match self.mode {
+            Mode::Creating { .. } => None,
+            _ => self.rect,
+        }
+    }
+
     /// 是否有正在进行的拖拽。
     pub fn is_active(&self) -> bool {
         !matches!(self.mode, Mode::Idle)
@@ -437,5 +445,20 @@ mod tests {
         assert_eq!(state.rect(), Some(RectI::new(105, 90, 220, 160)));
         state.resize_by(-1000, -1000, bounds());
         assert_eq!(state.rect(), Some(RectI::new(105, 90, 1, 1)));
+    }
+
+    #[test]
+    fn confirmed_rect_is_none_while_creating() {
+        let mut state = SelectionState::new();
+        assert_eq!(state.confirmed_rect(), None);
+        state.set_selection(RectI::new(10, 10, 100, 80));
+        assert_eq!(state.confirmed_rect(), Some(RectI::new(10, 10, 100, 80)));
+
+        state.begin(200, 200, bounds());
+        assert_eq!(state.confirmed_rect(), None);
+        state.update(260, 240, bounds());
+        assert_eq!(state.confirmed_rect(), None);
+        assert_eq!(state.end(bounds()), EndResult::Selected);
+        assert_eq!(state.confirmed_rect(), state.rect());
     }
 }
