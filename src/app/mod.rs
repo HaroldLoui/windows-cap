@@ -20,13 +20,23 @@ use crate::util::resources::process_resources;
 /// 解析命令行并执行对应子命令。
 pub fn run() -> Result<()> {
     crate::util::log::init()?;
+    crate::util::crash::install(crate::util::log::dir());
     let parsed = cli::parse();
     if parsed.verbose {
         log::set_max_level(log::LevelFilter::Debug);
     }
 
     match parsed.command {
-        cli::Command::Resident { config } => hotkey::run_resident(config),
+        cli::Command::Resident { config } => {
+            let log_dir = crate::util::log::dir();
+            if let Some(previous) = crate::util::crash::take_previous_session(log_dir.as_deref()) {
+                log::error!(
+                    "上次运行未正常退出（可能崩溃或被强制结束）：{previous}；如为 panic 崩溃，详见 last-crash.txt"
+                );
+            }
+            let _session = crate::util::crash::SessionGuard::start(log_dir.as_deref());
+            hotkey::run_resident(config)
+        }
         cli::Command::Settings { config } => settings_command(config),
         cli::Command::Once { config, delay_ms } => hotkey::run_once(config, delay_ms),
         cli::Command::Capture(options) => capture_command(options),

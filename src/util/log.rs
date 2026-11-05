@@ -119,6 +119,11 @@ fn date_key() -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+/// 日志目录（不存在时尝试创建）；崩溃钩子与会话标记也写在这里。
+pub fn dir() -> Option<PathBuf> {
+    log_dir()
+}
+
 fn log_dir() -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
     let dir = base.join("window-cap").join("logs");

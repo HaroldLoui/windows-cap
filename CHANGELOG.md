@@ -2,6 +2,17 @@
 
 版本号遵循语义化版本；预发布阶段使用 `-beta.N`。更早的迭代细节见 [docs/progress.md](docs/progress.md)。
 
+## [未发布]
+
+### 新增
+
+- 崩溃诊断：panic 钩子写入 `app-error.log` 与 `last-crash.txt`（线程、位置、backtrace），不依赖日志锁；常驻模式启动时检测上次异常退出并记录
+- 长稳回归脚本 `scripts/soak-24h.ps1` 与检查表 [docs/长稳回归.md](docs/长稳回归.md)：24 h 常驻 + 周期采集 + 连拍，输出 CSV 与 PASS/FAIL 结论
+
+### 验证
+
+- `cargo test`：36 passed（新增 3 项崩溃诊断测试）
+
 ## [0.10.1] - 2026-11-05
 
 双屏 / 混合 DPI 交互修复（办公机 2560×1600 @150% + 2560×1440 @100%，副屏偏移 (2560, 160)）。
