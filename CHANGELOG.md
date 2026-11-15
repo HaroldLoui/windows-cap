@@ -2,6 +2,25 @@
 
 版本号遵循语义化版本；预发布阶段使用 `-beta.N`。更早的迭代细节见 [docs/progress.md](docs/progress.md)。
 
+## [未发布]
+
+### 变更
+
+- 托盘菜单精简：移除「上次选区截图」「重新加载配置」「打开配置文件」，只保留截图、延迟截图、设置、开机自启与退出
+- 移除「上次选区截图」功能：`--capture --last`、`capture.last_region` 一并删除，截图不再写入配置文件
+- 配置文件监听：常驻实例自动重载 `config.toml`（约 1 秒）；非法文件保留当前配置并提示，不覆盖用户文件
+
+### 新增
+
+- CLI `--reload-config`：通知常驻实例重新加载配置（无常驻实例时返回非 0）
+- CLI `--open-config`：用记事本打开配置文件
+
+### 验证
+
+- `cargo test`：42 passed（新增配置指纹、非法配置不覆盖、托盘菜单、CLI 新参数等 6 项）
+- `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`：通过
+- 真机回归：改 `config.toml` 后约 3 秒内自动重载；非法配置不覆盖文件、不生成 `.bak`；`--last` 被拒绝；无常驻实例时 `--reload-config` 退出码 1
+
 ## [0.10.2] - 2026-11-15
 
 崩溃诊断、长稳回归与文档收尾。

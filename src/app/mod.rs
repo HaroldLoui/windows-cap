@@ -3,6 +3,7 @@
 pub mod autostart;
 pub mod cli;
 pub mod config;
+pub mod config_watch;
 pub mod hotkey;
 pub mod single_instance;
 pub mod tray;
@@ -45,6 +46,8 @@ pub fn run() -> Result<()> {
         cli::Command::Spike(name) => spike::run(&name),
         cli::Command::OverlaySelftest(iterations) => hotkey::run_overlay_selftest(iterations),
         cli::Command::Autostart(action) => autostart::run(action),
+        cli::Command::ReloadConfig => reload_config_command(),
+        cli::Command::OpenConfig { config } => open_config_command(config),
     }
 }
 
@@ -74,21 +77,9 @@ pub(crate) fn capture_command(options: cli::CaptureOptions) -> Result<()> {
     }
 
     let screen = VirtualScreen::current();
-    let rect = if options.last {
-        let path = config::Config::path(options.config.as_deref());
-        let (config, warning) = config::Config::load_or_create(&path);
-        if let Some(warning) = warning {
-            log::warn!("配置: {warning}");
-        }
-        config
-            .capture
-            .last_rect()
-            .ok_or_else(|| AppError::msg("还没有上次选区，请先执行一次截图"))?
-    } else {
-        options
-            .region
-            .unwrap_or_else(|| RectI::new(screen.x, screen.y, screen.width, screen.height))
-    };
+    let rect = options
+        .region
+        .unwrap_or_else(|| RectI::new(screen.x, screen.y, screen.width, screen.height));
 
     // 步骤 2：校验区域后采集一帧。
     if !screen.contains(rect) {
@@ -161,19 +152,37 @@ pub(crate) fn capture_command(options: cli::CaptureOptions) -> Result<()> {
         }
     }
 
-    // 步骤 4：记录本次选区，供 --last 使用。
-    record_last_region(&options, rect);
-
+    // 步骤 4：结束。
     Ok(())
 }
 
-fn record_last_region(options: &cli::CaptureOptions, rect: RectI) {
-    let path = config::Config::path(options.config.as_deref());
-    let (mut config, _) = config::Config::load_or_create(&path);
-    config.capture.set_last_rect(rect);
-    if let Err(error) = config.save(&path) {
-        ::log::warn!("save last region failed: {error}");
+/// 通知常驻实例重新加载配置；没有常驻实例时返回错误（脚本可据此判断）。
+fn reload_config_command() -> Result<()> {
+    if crate::app::single_instance::forward_reload() {
+        log::info!("已通知常驻实例重新加载配置");
+        Ok(())
+    } else {
+        Err(AppError::msg(
+            "没有运行中的 window-cap 实例，无法重新加载配置",
+        ))
     }
+}
+
+/// 用记事本打开配置文件；文件缺失时先创建默认配置。
+fn open_config_command(explicit_config: Option<PathBuf>) -> Result<()> {
+    let path = config::Config::path(explicit_config.as_deref());
+    if !path.exists() {
+        let (_config, warning) = config::Config::load_or_create(&path);
+        if let Some(warning) = warning {
+            log::warn!("配置: {warning}");
+        }
+    }
+    std::process::Command::new("notepad")
+        .arg(&path)
+        .spawn()
+        .map_err(|error| AppError::msg(format!("打开配置文件失败: {error}")))?;
+    log::info!("已打开配置文件: {}", path.display());
+    Ok(())
 }
 
 fn json_escape(value: &str) -> String {

@@ -23,6 +23,7 @@ use windows::core::w;
 
 use super::autostart;
 use super::config::{Config, DEFAULT_CAPTURE_HOTKEY, DEFAULT_QUIT_HOTKEY, Hotkey};
+use super::config_watch::{ConfigWatcher, WM_APP_CONFIG_CHANGED};
 use super::single_instance::{self, SingleInstance, WM_APP_ACTIVATE};
 use super::tray::{Tray, TrayCommand, WM_TRAY};
 use crate::capture::{CaptureBackend, GdiBackend, RectI, VirtualScreen};
@@ -94,6 +95,7 @@ pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
             config,
             config_path: path,
             tray: None,
+            watcher: None,
             capture_label: DEFAULT_CAPTURE_HOTKEY.to_string(),
             quit_label: DEFAULT_QUIT_HOTKEY.to_string(),
         });
@@ -101,6 +103,10 @@ pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
         ::log::info!("resident window hwnd={hwnd:?}");
 
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *app) as *mut App as isize);
+
+        // 监听配置文件变化：写入后自动重载，无需手动操作。
+        let watch_path = app.config_path.clone();
+        app.watcher = Some(ConfigWatcher::spawn(hwnd, &watch_path));
 
         match Tray::add(hwnd, "window-cap - 截图工具") {
             Ok(tray) => app.tray = Some(tray),
@@ -151,7 +157,7 @@ pub fn run_resident(config_path: Option<PathBuf>) -> Result<()> {
 /// 不走热键，直接执行一次截图流程（测试/脚本用）。
 pub fn run_once(config_path: Option<PathBuf>, delay_ms: u64) -> Result<()> {
     let path = Config::path(config_path.as_deref());
-    let (mut config, warning) = Config::load_or_create(&path);
+    let (config, warning) = Config::load_or_create(&path);
     if let Some(warning) = warning {
         log::warn!("配置: {warning}");
     }
@@ -163,10 +169,6 @@ pub fn run_once(config_path: Option<PathBuf>, delay_ms: u64) -> Result<()> {
 
     match capture_flow(None, &config, false)? {
         Some(outcome) => {
-            config.capture.set_last_rect(outcome.rect);
-            if let Err(error) = config.save(&path) {
-                log::warn!("保存上次选区失败: {error}");
-            }
             log::info!("{}", outcome.message());
             Ok(())
         }
@@ -280,7 +282,6 @@ pub fn run_overlay_selftest(iterations: u32) -> Result<()> {
 struct CaptureOutcome {
     width: u32,
     height: u32,
-    rect: RectI,
     path: Option<PathBuf>,
     copied: bool,
     pinned: bool,
@@ -335,11 +336,7 @@ fn capture_flow(
 
     // 步骤 3：按确认结果输出图片、贴图或结束。
     match result {
-        OverlayResult::Confirmed {
-            image,
-            rect,
-            action,
-        } => {
+        OverlayResult::Confirmed { image, action, .. } => {
             let (copied, path) = match action {
                 OutputAction::Copy => {
                     clipboard::put(&image)?;
@@ -364,7 +361,6 @@ fn capture_flow(
             Ok(Some(CaptureOutcome {
                 width: image.width,
                 height: image.height,
-                rect,
                 path,
                 copied,
                 pinned: false,
@@ -373,13 +369,11 @@ fn capture_flow(
         OverlayResult::Pinned { image } => {
             let width = image.width;
             let height = image.height;
-            let origin = image.origin;
             ui::pin::show(image)?;
             ::log::info!("pinned capture {width}x{height}");
             Ok(Some(CaptureOutcome {
                 width,
                 height,
-                rect: RectI::new(origin.0, origin.1, width as i32, height as i32),
                 path: None,
                 copied: false,
                 pinned: true,
@@ -392,50 +386,12 @@ fn capture_flow(
     }
 }
 
-/// 直接按给定区域截图（不走遮罩），用于“按上次选区截图”。
-fn capture_region(rect: RectI) -> Result<CaptureOutcome> {
-    let screen = VirtualScreen::current();
-    if !screen.contains(rect) {
-        return Err(AppError::msg(format!(
-            "区域 {rect} 超出虚拟桌面 {}x{} @ ({}, {})",
-            screen.width, screen.height, screen.x, screen.y
-        )));
-    }
-
-    let area = VirtualScreen {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-    };
-    let mut backend = GdiBackend;
-    let frame = backend.capture(area)?;
-    clipboard::put(&frame)?;
-
-    ::log::info!(
-        "capture region {}x{} at ({}, {}) copied={}",
-        frame.width,
-        frame.height,
-        rect.x,
-        rect.y,
-        true
-    );
-
-    Ok(CaptureOutcome {
-        width: frame.width,
-        height: frame.height,
-        rect,
-        path: None,
-        copied: true,
-        pinned: false,
-    })
-}
-
 struct App {
     hwnd: HWND,
     config: Config,
     config_path: PathBuf,
     tray: Option<Tray>,
+    watcher: Option<ConfigWatcher>,
     capture_label: String,
     quit_label: String,
 }
@@ -510,7 +466,6 @@ impl App {
     fn do_capture(&mut self) {
         match capture_flow(None, &self.config, true) {
             Ok(Some(outcome)) => {
-                self.remember_region(outcome.rect);
                 if outcome.path.is_some() {
                     self.notify(&outcome.message(), false);
                 }
@@ -520,33 +475,6 @@ impl App {
             }
             Err(error) => {
                 ::log::error!("capture failed: {error}");
-                self.notify(&format!("截图失败: {error}"), true);
-            }
-        }
-    }
-
-    fn remember_region(&mut self, rect: RectI) {
-        self.config.capture.set_last_rect(rect);
-        if let Err(error) = self.config.save(&self.config_path) {
-            ::log::warn!("save last region failed: {error}");
-        }
-    }
-
-    fn capture_last_region(&mut self) {
-        let Some(rect) = self.config.capture.last_rect() else {
-            self.notify("还没有上次选区，先截图一次", true);
-            return;
-        };
-
-        match capture_region(rect) {
-            Ok(outcome) => {
-                self.remember_region(outcome.rect);
-                if outcome.path.is_some() {
-                    self.notify(&outcome.message(), false);
-                }
-            }
-            Err(error) => {
-                ::log::error!("last region capture failed: {error}");
                 self.notify(&format!("截图失败: {error}"), true);
             }
         }
@@ -625,11 +553,10 @@ impl App {
 
     fn show_menu(&mut self) {
         let autostart_enabled = autostart::is_enabled();
-        let last_region = self.config.capture.last_rect();
         let command = self
             .tray
             .as_ref()
-            .and_then(|tray| tray.show_menu(autostart_enabled, &self.capture_label, last_region));
+            .and_then(|tray| tray.show_menu(autostart_enabled, &self.capture_label));
 
         let Some(command) = command else {
             return;
@@ -638,11 +565,8 @@ impl App {
         match command {
             TrayCommand::Capture => self.start_capture(false),
             TrayCommand::DelayedCapture => self.start_capture(true),
-            TrayCommand::LastRegion => self.capture_last_region(),
             TrayCommand::Settings => self.open_settings(),
-            TrayCommand::ReloadConfig => self.reload_config(),
             TrayCommand::ToggleAutostart => self.toggle_autostart(),
-            TrayCommand::OpenConfig => self.open_config(),
             TrayCommand::Quit => unsafe {
                 let _ = DestroyWindow(self.hwnd);
             },
@@ -675,26 +599,34 @@ impl App {
     }
 
     fn reload_config(&mut self) {
-        let (config, warning) = Config::load_or_create(&self.config_path);
-        if let Some(warning) = warning {
-            self.notify(&warning, true);
-        }
-        self.config = config;
-        if self.apply_hotkeys() {
-            let tooltip = format!("window-cap - {} 截图", self.capture_label);
-            if let Some(tray) = &self.tray {
-                tray.set_tooltip(&tooltip);
+        // 只读不落盘：文件半写或格式错误时保留当前配置，不能覆盖用户文件。
+        match Config::load(&self.config_path) {
+            Ok(config) if config == self.config => {
+                ::log::info!("config unchanged: {}", self.config_path.display());
             }
-            ::log::info!(
-                "config reloaded from {}: capture={} quit={}",
-                self.config_path.display(),
-                self.capture_label,
-                self.quit_label
-            );
-            self.notify(
-                &format!("配置已重新加载，截图热键 {}", self.capture_label),
-                false,
-            );
+            Ok(config) => {
+                self.config = config;
+                if self.apply_hotkeys() {
+                    let tooltip = format!("window-cap - {} 截图", self.capture_label);
+                    if let Some(tray) = &self.tray {
+                        tray.set_tooltip(&tooltip);
+                    }
+                    ::log::info!(
+                        "config reloaded from {}: capture={} quit={}",
+                        self.config_path.display(),
+                        self.capture_label,
+                        self.quit_label
+                    );
+                    self.notify(
+                        &format!("配置已重新加载，截图热键 {}", self.capture_label),
+                        false,
+                    );
+                }
+            }
+            Err(error) => {
+                ::log::warn!("config reload failed: {error}");
+                self.notify(&format!("配置未重新加载：{error}"), true);
+            }
         }
     }
 
@@ -709,15 +641,6 @@ impl App {
                 }
             }
             Err(error) => self.notify(&format!("设置开机自启失败: {error}"), true),
-        }
-    }
-
-    fn open_config(&mut self) {
-        if let Err(error) = std::process::Command::new("notepad")
-            .arg(&self.config_path)
-            .spawn()
-        {
-            self.notify(&format!("打开配置文件失败: {error}"), true);
         }
     }
 }
@@ -868,9 +791,17 @@ unsafe extern "system" fn hotkey_wndproc(
                 }
                 LRESULT(1)
             }
-            WM_DESTROY => {
-                // 先释放托盘图标，避免退出后残留。
+            // 配置文件变化（监听线程投递）：只重载，不覆盖文件。
+            WM_APP_CONFIG_CHANGED => {
                 if let Some(app) = state(hwnd) {
+                    app.reload_config();
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                // 先停止监听并释放托盘图标，避免退出后残留。
+                if let Some(app) = state(hwnd) {
+                    app.watcher = None;
                     app.tray = None;
                 }
                 PostQuitMessage(0);

@@ -8,14 +8,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
 
-use crate::capture::RectI;
 use crate::util::error::{AppError, Result};
 
 pub const DEFAULT_CAPTURE_HOTKEY: &str = "Ctrl+Alt+A";
 pub const DEFAULT_QUIT_HOTKEY: &str = "Ctrl+Alt+Q";
 
 /// 完整应用配置。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
     pub hotkey: HotkeyConfig,
@@ -25,7 +24,7 @@ pub struct Config {
 }
 
 /// 全局热键配置。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotkeyConfig {
     pub capture: String,
@@ -33,31 +32,15 @@ pub struct HotkeyConfig {
 }
 
 /// 截图行为配置。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct CaptureConfig {
     /// 截图前等待毫秒数（托盘“延迟截图”和 CLI `--delay` 使用）。
     pub delay_ms: u64,
-    /// 上次确认的选区（屏幕坐标 x, y, w, h），用于“按上次选区截图”。
-    pub last_region: Option<[i32; 4]>,
-}
-
-impl CaptureConfig {
-    /// 上次选区；无效时返回 None。
-    pub fn last_rect(&self) -> Option<RectI> {
-        let [x, y, width, height] = self.last_region?;
-        let rect = RectI::new(x, y, width, height);
-        if rect.is_empty() { None } else { Some(rect) }
-    }
-
-    /// 记录上次选区。
-    pub fn set_last_rect(&mut self, rect: RectI) {
-        self.last_region = Some([rect.x, rect.y, rect.width, rect.height]);
-    }
 }
 
 /// 输出行为配置。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OutputConfig {
     /// 保存目录；支持 `%USERPROFILE%` 前缀，相对路径按用户目录展开。
@@ -66,7 +49,7 @@ pub struct OutputConfig {
 }
 
 /// 界面配置。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub language: String,
@@ -142,6 +125,14 @@ impl Config {
                 Some(format!("读取配置失败（{error}），使用默认值")),
             ),
         }
+    }
+
+    /// 只读取不落盘：用于文件监听与手动重载，半写/损坏时不备份也不重建。
+    pub fn load(path: &Path) -> std::result::Result<Self, String> {
+        let text = fs::read_to_string(path).map_err(|error| format!("读取配置失败: {error}"))?;
+        toml::from_str::<Config>(&text)
+            .map(Config::sanitize)
+            .map_err(|error| format!("配置格式错误: {error}"))
     }
 
     /// 写入配置文件。
@@ -339,6 +330,32 @@ mod tests {
         assert!(warning.is_some());
         assert!(path.with_extension("toml.bak").exists());
         assert_eq!(config.output.save_dir, "Pictures/Screenshots");
+
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn load_does_not_touch_broken_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "window-cap-config-load-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&directory).expect("创建临时目录失败");
+        let path = directory.join("config.toml");
+        fs::write(&path, "not = [valid").expect("写坏配置失败");
+
+        assert!(Config::load(&path).is_err());
+        assert_eq!(
+            fs::read_to_string(&path).expect("读取失败"),
+            "not = [valid",
+            "监听重载不能改写用户文件"
+        );
+        assert!(!path.with_extension("toml.bak").exists());
+        assert!(!path.with_extension("toml.tmp").exists());
 
         let _ = fs::remove_dir_all(&directory);
     }

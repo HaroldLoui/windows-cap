@@ -16,7 +16,7 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 - **工具栏**：纯图标两行布局、外部优先放置、hover/tooltip、撤销/重做/复制/保存/关闭
 - **贴图 Pin**：截图置顶悬浮，阴影、拖动、Ctrl+滚轮缩放（显示百分比）、复制/保存/关闭
 - **输出**：复制到剪贴板（CF_DIB）、PNG 原子写入
-- **常驻**：托盘菜单、全局热键、单实例、配置、开机自启、延迟截图、上次选区
+- **常驻**：托盘菜单、全局热键、单实例、配置（自动重载）、开机自启、延迟截图
 - **设置页**：托盘“设置...”或 `--settings`，卡片布局、热键录制、保存目录、延迟、开机自启开关
 - **打包**：一键生成便携 zip
 
@@ -79,7 +79,8 @@ window-cap.exe                 # 常驻
 window-cap.exe --settings      # 打开设置窗口
 window-cap.exe --once          # 立即截图一次后退出
 window-cap.exe --capture --region 100,100,400,300 --output shot.png
-window-cap.exe --capture --last --output shot.png
+window-cap.exe --reload-config # 通知常驻实例重新加载配置
+window-cap.exe --open-config   # 用记事本打开配置文件
 window-cap.exe --selftest      # 环境/采集/剪贴板/落盘自检
 ```
 
@@ -101,7 +102,7 @@ save_dir = "Pictures/Screenshots"
 delay_ms = 0
 ```
 
-修改后可在托盘菜单选择“重载配置”。
+修改保存后常驻实例会自动重载（约 1 秒）；也可用 `window-cap.exe --reload-config` 手动触发。
 
 ## 文档
 

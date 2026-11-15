@@ -48,13 +48,17 @@ pub struct Cli {
     #[arg(long)]
     pub clipboard: bool,
 
-    /// 配合 --capture：使用上次选区（无需遮罩）
-    #[arg(long)]
-    pub last: bool,
-
     /// 配合 --capture：以 JSON 输出结果
     #[arg(long)]
     pub json: bool,
+
+    /// 通知运行中的常驻实例重新加载配置后退出
+    #[arg(long)]
+    pub reload_config: bool,
+
+    /// 用记事本打开配置文件后退出
+    #[arg(long)]
+    pub open_config: bool,
 
     /// 截图前延迟毫秒数（--once / --capture）
     #[arg(long, default_value_t = 0)]
@@ -117,6 +121,10 @@ pub enum Command {
     Spike(String),
     OverlaySelftest(u32),
     Autostart(AutoStartAction),
+    ReloadConfig,
+    OpenConfig {
+        config: Option<PathBuf>,
+    },
 }
 
 /// 无 UI 采集选项。
@@ -127,8 +135,6 @@ pub struct CaptureOptions {
     pub clipboard: bool,
     pub json: bool,
     pub delay_ms: u64,
-    pub last: bool,
-    pub config: Option<PathBuf>,
 }
 
 /// 解析命令行；`--help` / `--version` 写入日志后退出。
@@ -169,11 +175,8 @@ where
 impl Cli {
     fn into_command(self) -> Result<Command> {
         // 步骤 1：校验模式与采集选项组合。
-        let capture_options_present = self.region.is_some()
-            || self.output.is_some()
-            || self.clipboard
-            || self.json
-            || self.last;
+        let capture_options_present =
+            self.region.is_some() || self.output.is_some() || self.clipboard || self.json;
 
         let modes = [
             self.hotkey,
@@ -185,6 +188,8 @@ impl Cli {
             self.spike.is_some(),
             self.overlay_selftest.is_some(),
             self.autostart.is_some(),
+            self.reload_config,
+            self.open_config,
         ]
         .iter()
         .filter(|present| **present)
@@ -192,7 +197,7 @@ impl Cli {
 
         if modes > 1 {
             return Err(AppError::msg(
-                "只能指定一个运行模式：--hotkey / --settings / --once / --selftest / --capture / --soak / --spike / --overlay-selftest / --autostart",
+                "只能指定一个运行模式：--hotkey / --settings / --once / --selftest / --capture / --soak / --spike / --overlay-selftest / --autostart / --reload-config / --open-config",
             ));
         }
 
@@ -202,13 +207,17 @@ impl Cli {
             ));
         }
 
-        if self.last && self.region.is_some() {
-            return Err(AppError::msg("--last 与 --region 不能同时使用"));
-        }
-
         // 步骤 2：按优先级选择命令。
         if let Some(action) = self.autostart {
             return Ok(Command::Autostart(action));
+        }
+        if self.reload_config {
+            return Ok(Command::ReloadConfig);
+        }
+        if self.open_config {
+            return Ok(Command::OpenConfig {
+                config: self.config,
+            });
         }
         if self.settings {
             return Ok(Command::Settings {
@@ -246,8 +255,6 @@ impl Cli {
                 clipboard: self.clipboard,
                 json: self.json,
                 delay_ms: self.delay,
-                last: self.last,
-                config: self.config,
             }));
         }
         if self.delay > 0 {
@@ -288,7 +295,17 @@ mod tests {
         ));
         assert!(parsed(&["--once", "--selftest"]).is_err());
         assert!(parsed(&["--region", "1,2,3,4"]).is_ok());
-        assert!(parsed(&["--capture", "--last"]).is_ok());
-        assert!(parsed(&["--last", "--region", "1,2,3,4"]).is_err());
+        assert!(matches!(
+            parsed(&["--reload-config"]),
+            Ok(Command::ReloadConfig)
+        ));
+        assert!(matches!(
+            parsed(&["--open-config"]),
+            Ok(Command::OpenConfig { .. })
+        ));
+        assert!(parsed(&["--reload-config", "--capture"]).is_err());
+        assert!(parsed(&["--reload-config", "--open-config"]).is_err());
+        // 上次选区功能已移除，--last 不再接受。
+        assert!(parsed(&["--capture", "--last"]).is_err());
     }
 }

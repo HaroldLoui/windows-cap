@@ -27,11 +27,8 @@ const TRAY_ID: u32 = 1;
 pub enum TrayCommand {
     Capture,
     DelayedCapture,
-    LastRegion,
     Settings,
-    ReloadConfig,
     ToggleAutostart,
-    OpenConfig,
     Quit,
 }
 
@@ -40,12 +37,9 @@ impl TrayCommand {
         match self {
             Self::Capture => 1,
             Self::DelayedCapture => 2,
-            Self::LastRegion => 3,
-            Self::Settings => 8,
-            Self::ReloadConfig => 4,
-            Self::ToggleAutostart => 5,
-            Self::OpenConfig => 6,
-            Self::Quit => 7,
+            Self::Settings => 3,
+            Self::ToggleAutostart => 4,
+            Self::Quit => 5,
         }
     }
 
@@ -53,15 +47,56 @@ impl TrayCommand {
         match id {
             1 => Some(Self::Capture),
             2 => Some(Self::DelayedCapture),
-            3 => Some(Self::LastRegion),
-            8 => Some(Self::Settings),
-            4 => Some(Self::ReloadConfig),
-            5 => Some(Self::ToggleAutostart),
-            6 => Some(Self::OpenConfig),
-            7 => Some(Self::Quit),
+            3 => Some(Self::Settings),
+            4 => Some(Self::ToggleAutostart),
+            5 => Some(Self::Quit),
             _ => None,
         }
     }
+}
+
+/// 菜单条目：分隔线或可点击项。
+#[derive(Debug, PartialEq, Eq)]
+enum MenuEntry {
+    Separator,
+    Item {
+        id: usize,
+        label: String,
+        checked: bool,
+    },
+}
+
+/// 按当前状态生成菜单条目（纯函数，便于单测）。
+fn menu_entries(autostart: bool, capture_label: &str) -> Vec<MenuEntry> {
+    vec![
+        MenuEntry::Item {
+            id: TrayCommand::Capture.id(),
+            label: format!("截图    {capture_label}"),
+            checked: false,
+        },
+        MenuEntry::Item {
+            id: TrayCommand::DelayedCapture.id(),
+            label: "延迟 3 秒截图".to_string(),
+            checked: false,
+        },
+        MenuEntry::Item {
+            id: TrayCommand::Settings.id(),
+            label: "设置...".to_string(),
+            checked: false,
+        },
+        MenuEntry::Separator,
+        MenuEntry::Item {
+            id: TrayCommand::ToggleAutostart.id(),
+            label: "开机自启".to_string(),
+            checked: autostart,
+        },
+        MenuEntry::Separator,
+        MenuEntry::Item {
+            id: TrayCommand::Quit.id(),
+            label: "退出".to_string(),
+            checked: false,
+        },
+    ]
 }
 
 /// 托盘图标及其菜单。
@@ -136,55 +171,24 @@ impl Tray {
     }
 
     /// 弹出右键菜单并返回用户选择。
-    pub fn show_menu(
-        &self,
-        autostart: bool,
-        capture_label: &str,
-        last_region: Option<crate::capture::RectI>,
-    ) -> Option<TrayCommand> {
+    pub fn show_menu(&self, autostart: bool, capture_label: &str) -> Option<TrayCommand> {
         // 步骤 1：构建菜单项。
         let menu = unsafe { CreatePopupMenu().ok()? };
-        let capture_text = format!("截图    {capture_label}");
-        let last_text = match last_region {
-            Some(rect) => format!("上次选区截图    {}×{}", rect.width, rect.height),
-            None => "上次选区截图".to_string(),
-        };
 
         unsafe {
-            append(menu, MF_STRING, TrayCommand::Capture.id(), &capture_text);
-            append(
-                menu,
-                MF_STRING,
-                TrayCommand::DelayedCapture.id(),
-                "延迟 3 秒截图",
-            );
-            append(menu, MF_STRING, TrayCommand::LastRegion.id(), &last_text);
-            append(menu, MF_STRING, TrayCommand::Settings.id(), "设置...");
-            append(menu, MF_SEPARATOR, 0, "");
-            append(
-                menu,
-                MF_STRING,
-                TrayCommand::ReloadConfig.id(),
-                "重新加载配置",
-            );
-            append(
-                menu,
-                MF_STRING,
-                TrayCommand::OpenConfig.id(),
-                "打开配置文件",
-            );
-            append(
-                menu,
-                if autostart {
-                    MF_STRING | MF_CHECKED
-                } else {
-                    MF_STRING
-                },
-                TrayCommand::ToggleAutostart.id(),
-                "开机自启",
-            );
-            append(menu, MF_SEPARATOR, 0, "");
-            append(menu, MF_STRING, TrayCommand::Quit.id(), "退出");
+            for entry in menu_entries(autostart, capture_label) {
+                match entry {
+                    MenuEntry::Item { id, label, checked } => {
+                        let flags = if checked {
+                            MF_STRING | MF_CHECKED
+                        } else {
+                            MF_STRING
+                        };
+                        append(menu, flags, id, &label);
+                    }
+                    MenuEntry::Separator => append(menu, MF_SEPARATOR, 0, ""),
+                }
+            }
 
             // 步骤 2：置前并弹出菜单。
             let mut point = POINT::default();
@@ -279,5 +283,76 @@ fn copy_wide(text: &str, destination: &mut [u16]) {
     destination[..length].copy_from_slice(&source[..length]);
     if length == destination.len() {
         destination[length - 1] = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn menu_labels(autostart: bool) -> Vec<String> {
+        menu_entries(autostart, "Ctrl+Alt+A")
+            .into_iter()
+            .filter_map(|entry| match entry {
+                MenuEntry::Item { label, .. } => Some(label),
+                MenuEntry::Separator => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn menu_drops_last_region_and_config_entries() {
+        let labels = menu_labels(false);
+        assert!(labels.iter().any(|label| label.starts_with("截图")));
+        assert!(labels.iter().any(|label| label == "延迟 3 秒截图"));
+        assert!(labels.iter().any(|label| label == "设置..."));
+        assert!(labels.iter().any(|label| label == "开机自启"));
+        assert_eq!(labels.last().map(String::as_str), Some("退出"));
+
+        for removed in ["上次选区", "重新加载配置", "打开配置文件"] {
+            assert!(
+                !labels.iter().any(|label| label.contains(removed)),
+                "托盘菜单不应再包含「{removed}」"
+            );
+        }
+    }
+
+    #[test]
+    fn menu_ids_are_unique_and_map_back() {
+        let mut ids = Vec::new();
+        for entry in menu_entries(true, "Ctrl+Alt+B") {
+            if let MenuEntry::Item { id, .. } = entry {
+                assert!(!ids.contains(&id), "菜单 ID 重复: {id}");
+                assert!(
+                    TrayCommand::from_id(id).is_some(),
+                    "菜单 ID 没有对应命令: {id}"
+                );
+                ids.push(id);
+            }
+        }
+        assert_eq!(ids.len(), 5);
+    }
+
+    #[test]
+    fn autostart_flag_sets_checkmark() {
+        let checked = menu_entries(true, "Ctrl+Alt+A");
+        assert!(checked.iter().any(|entry| matches!(
+            entry,
+            MenuEntry::Item {
+                label,
+                checked: true,
+                ..
+            } if label == "开机自启"
+        )));
+
+        let unchecked = menu_entries(false, "Ctrl+Alt+A");
+        assert!(unchecked.iter().any(|entry| matches!(
+            entry,
+            MenuEntry::Item {
+                label,
+                checked: false,
+                ..
+            } if label == "开机自启"
+        )));
     }
 }
