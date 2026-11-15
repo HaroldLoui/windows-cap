@@ -1,6 +1,6 @@
 # 已知问题
 
-> 版本：0.10.1　更新：2026-11-05  
+> 版本：0.10.2　更新：2026-11-15  
 > 记录当前版本已确认的限制与未验证场景；新问题请到 <https://github.com/HaroldLoui/windows-cap/issues> 反馈。  
 > 日志目录：`%LOCALAPPDATA%\window-cap\logs`（`app.log` / `app-warn.log` / `app-error.log`）。
 
@@ -25,7 +25,7 @@
 - **托盘图标**：Win11 可能收进溢出区，暂无引导/固定提示。
 - **文字输入**：复杂 IME 组合（候选窗、多行）偶有焦点/光标异常。
 - **崩溃定位**：panic 会写入 `app-error.log` 与 `last-crash.txt`（线程、位置、backtrace）；若进程被强制结束，下次常驻启动会在 `app-error.log` 记录“上次运行未正常退出”。
-- **长时挂机**：24 h 常驻验证待执行；脚本与检查表已就绪（`scripts/soak-24h.ps1`、[长稳回归.md](长稳回归.md)），本轮只跑过 `--soak 200`。
+- **长时挂机**：24 h 常驻验证待执行；2 分钟预跑与 30 分钟长稳（200 连拍 + 15 次周期采集）已在 v0.10.2 通过；脚本与检查表见 `scripts/soak-24h.ps1`、[长稳回归.md](长稳回归.md)。
 
 ## 采集相关
 

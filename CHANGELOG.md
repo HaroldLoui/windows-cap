@@ -2,16 +2,27 @@
 
 版本号遵循语义化版本；预发布阶段使用 `-beta.N`。更早的迭代细节见 [docs/progress.md](docs/progress.md)。
 
-## [未发布]
+## [0.10.2] - 2026-11-15
+
+崩溃诊断、长稳回归与文档收尾。
 
 ### 新增
 
 - 崩溃诊断：panic 钩子写入 `app-error.log` 与 `last-crash.txt`（线程、位置、backtrace），不依赖日志锁；常驻模式启动时检测上次异常退出并记录
 - 长稳回归脚本 `scripts/soak-24h.ps1` 与检查表 [docs/长稳回归.md](docs/长稳回归.md)：24 h 常驻 + 周期采集 + 连拍，输出 CSV 与 PASS/FAIL 结论
 
+### 修复
+
+- `scripts/soak-24h.ps1` 补 UTF-8 BOM：Windows PowerShell 5.1 默认按 ANSI 读取无 BOM 脚本，中文注释会导致解析失败
+- 文档同步：README 双屏回归状态与版本、`progress.md` 后续列表、`known-issues.md` 与待办的版本号
+
 ### 验证
 
+- `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`：通过
 - `cargo test`：36 passed（新增 3 项崩溃诊断测试）
+- 2 分钟预跑（20 连拍 + 2 次周期采集）：PASS
+- 30 分钟长稳回归（200 连拍 + 15 次周期采集）：PASS；GDI/USER +0、内存 +0.0 MB，采集 25.6–31.7 ms，常驻内存 11.2 MB
+- 便携包：`window-cap-0.10.2-portable.zip`，SHA256 `6297d6ac80645ec4d4cb1a6b1db6d48a250450e6545234a12b453e8a182a07aa`
 
 ## [0.10.1] - 2026-11-05
 

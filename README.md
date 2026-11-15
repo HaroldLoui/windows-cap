@@ -4,7 +4,7 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 
 仓库：<https://github.com/HaroldLoui/windows-cap>
 
-当前版本：**0.10.1**（双屏交互修复）。支持 Windows 10/11；36 项单元测试与静态检查通过；整虚拟桌面采集已在双屏混合 DPI 环境验证（2560×1600 @150% + 2560×1440 @100%，5120×1600 / 70 ms）；双屏遮罩交互（工具栏归属屏、跨屏拖动、初始提示标签）已完成人工回归；4K/RDP/HDR 仍在兼容性测试中。
+当前版本：**0.10.2**（崩溃诊断与长稳回归）。支持 Windows 10/11；36 项单元测试与静态检查通过；整虚拟桌面采集已在双屏混合 DPI 环境验证（2560×1600 @150% + 2560×1440 @100%，5120×1600 / 70 ms）；双屏遮罩交互（工具栏归属屏、跨屏拖动、初始提示标签）已完成人工回归；30 分钟长稳回归通过（200 连拍 + 15 次周期采集，内存 +0.0 MB）；4K/RDP/HDR 仍在兼容性测试中。
 
 ![工具栏](docs/images/toolbar.png)
 
@@ -32,8 +32,8 @@ Windows 截图与标注工具，使用 Rust + [`windows-rs`](https://github.com/
 ### 下载
 
 - GitHub Releases：<https://github.com/HaroldLoui/windows-cap/releases>
-- 当前版本：[`v0.10.1`](https://github.com/HaroldLoui/windows-cap/releases/tag/v0.10.1) 便携 zip，解压后运行 `window-cap.exe`。
-- 便携包 SHA256：`5497ed6453f1a43e16bf6e3f0fe4295a76f0d70ef8472c107064fce983e1efc0`
+- 当前版本：[`v0.10.2`](https://github.com/HaroldLoui/windows-cap/releases/tag/v0.10.2) 便携 zip，解压后运行 `window-cap.exe`。
+- 便携包 SHA256：`6297d6ac80645ec4d4cb1a6b1db6d48a250450e6545234a12b453e8a182a07aa`
 
 ### 从源码构建
 
@@ -122,6 +122,12 @@ cargo test
 cargo run -- --once
 ```
 
+发布前跑长稳回归（详见 [docs/长稳回归.md](docs/长稳回归.md)）：
+
+```powershell
+powershell -NoProfile -File scripts\soak-24h.ps1 -Hours 0.5
+```
+
 代码约定见[开发文档](docs/开发文档.md)。核心目录：
 
 ```
@@ -136,8 +142,9 @@ src/output      PNG / 剪贴板
 
 - ✅ 基础截图、标注、工具栏、文字、贴图、常驻
 - ✅ 双屏混合 DPI 环境整虚拟桌面采集（v0.10.0，5120×1600 / 70 ms）
+- ✅ 双屏遮罩交互回归（v0.10.1，工具栏归属屏、跨屏拖动、初始提示标签）
+- ✅ 长稳回归 30 分钟（v0.10.2，200 连拍 + 15 次周期采集）
 - ⏳ 4K/RDP/HDR/独占全屏兼容性（无目标环境，暂缓）
-- ⏳ 跨屏 UI 交互回归（双屏硬件环境下补跑）
 - ⏳ 截长图（方案评估完成）
 - ⏳ MSI 安装包 / 自动更新（等 GitHub 发布后）
 
