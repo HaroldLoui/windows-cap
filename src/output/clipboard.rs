@@ -14,6 +14,8 @@ use crate::util::error::{AppError, Result};
 
 /// Windows 标准剪贴板格式 `CF_DIB`（值为 8）。
 const CF_DIB: u32 = 8;
+/// Windows 标准剪贴板格式 `CF_UNICODETEXT`（值为 13）。
+const CF_UNICODETEXT: u32 = 13;
 /// `BITMAPINFOHEADER` 的字节数。
 const DIB_HEADER_BYTES: usize = 40;
 
@@ -42,6 +44,59 @@ pub fn put(frame: &Frame) -> Result<()> {
 
                         // 设置成功后所有权归系统；失败路径自行 GlobalFree。
                         match SetClipboardData(CF_DIB, Some(HANDLE(hglobal.0))) {
+                            Ok(_) => Ok(()),
+                            Err(error) => {
+                                let _ = GlobalFree(Some(hglobal));
+                                Err(error.into())
+                            }
+                        }
+                    })()
+                };
+                let _ = unsafe { CloseClipboard() };
+                result?;
+                return Ok(());
+            }
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
+    Err(last_error
+        .map(AppError::from)
+        .unwrap_or_else(|| AppError::msg("剪贴板被其他程序占用")))
+}
+
+/// 把文本以 `CF_UNICODETEXT` 放入剪贴板（取色复制用）。
+pub fn put_text(text: &str) -> Result<()> {
+    let data: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let bytes = data.len() * 2;
+    let mut last_error: Option<windows::core::Error> = None;
+
+    // 与图片复制一致：剪贴板可能被占用，最多重试 3 次。
+    for attempt in 0..3 {
+        match unsafe { OpenClipboard(None) } {
+            Ok(()) => {
+                let result = unsafe {
+                    (|| -> Result<()> {
+                        EmptyClipboard()?;
+                        let hglobal = GlobalAlloc(GMEM_MOVEABLE, bytes)?;
+                        let pointer = GlobalLock(hglobal);
+                        if pointer.is_null() {
+                            let _ = GlobalFree(Some(hglobal));
+                            return Err(AppError::msg("GlobalLock 失败"));
+                        }
+                        std::ptr::copy_nonoverlapping(
+                            data.as_ptr() as *const u8,
+                            pointer as *mut u8,
+                            bytes,
+                        );
+                        let _ = GlobalUnlock(hglobal);
+
+                        match SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hglobal.0))) {
                             Ok(_) => Ok(()),
                             Err(error) => {
                                 let _ = GlobalFree(Some(hglobal));

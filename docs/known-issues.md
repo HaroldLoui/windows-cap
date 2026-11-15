@@ -1,6 +1,6 @@
 # 已知问题
 
-> 版本：0.10.2　更新：2026-11-15  
+> 版本：0.11.0　更新：2026-11-15  
 > 记录当前版本已确认的限制与未验证场景；新问题请到 <https://github.com/HaroldLoui/windows-cap/issues> 反馈。  
 > 日志目录：`%LOCALAPPDATA%\window-cap\logs`（`app.log` / `app-warn.log` / `app-error.log`）。
 

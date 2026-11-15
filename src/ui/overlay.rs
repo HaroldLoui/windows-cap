@@ -33,6 +33,7 @@ use windows::core::{PCWSTR, w};
 
 use crate::annotate::{Document, Point, Shape, ShapeKind, render};
 use crate::capture::{Frame, MonitorInfo, RectI, VirtualScreen, monitors};
+use crate::output::clipboard;
 use crate::platform::dib::Dib;
 use crate::ui::kit::dpi::{scale_from_dpi, scale_from_hwnd};
 use crate::ui::kit::text as kit_text;
@@ -46,6 +47,12 @@ const CLASS_NAME: PCWSTR = w!("window_cap_overlay");
 const WM_FINISHED: u32 = WM_APP + 1;
 const TIMER_SCRIPT: usize = 1;
 const TIMER_TOOLTIP: usize = 2;
+const TIMER_COPY: usize = 3;
+
+/// 放大镜采样的源像素边长（15×15）。
+const MAGNIFIER_SAMPLES: i32 = 15;
+/// 每个源像素的默认放大倍数（再乘以屏幕 DPI）。
+const MAGNIFIER_ZOOM: f32 = 8.0;
 
 /// 遮罩启动选项。
 #[derive(Clone, Copy, Debug, Default)]
@@ -144,6 +151,8 @@ pub fn select(frame: Frame, area: VirtualScreen, options: OverlayOptions) -> Res
             tooltip_action: None,
             cursor: (cursor_x, cursor_y),
             previous_foreground,
+            magnifier_on: false,
+            copied_color: None,
         });
 
         let pointer = (&mut *overlay) as *mut Overlay;
@@ -254,6 +263,25 @@ struct ShapeDrag {
     points: Vec<Point>,
 }
 
+/// 放大镜的布局、采样区域与颜色标签。
+struct MagnifierLayout {
+    /// 遮罩客户区左上角。
+    x: i32,
+    y: i32,
+    /// 整个放大镜边长与每个源像素的边长。
+    side: i32,
+    cell: i32,
+    /// 采样区域左上角（冻结帧坐标）。
+    sx: i32,
+    sy: i32,
+    /// 光标像素在采样区域中的格坐标。
+    center: (i32, i32),
+    scale: f32,
+    /// 所在显示器的客户区范围（用于夹紧标签）。
+    bounds: RectI,
+    hex: String,
+}
+
 /// 文字输入框的移动/缩放拖拽，坐标为遮罩客户区。
 #[derive(Clone, Copy)]
 enum TextDrag {
@@ -339,6 +367,10 @@ struct Overlay {
     paint_total_ms: f64,
     cursor: (i32, i32),
     previous_foreground: HWND,
+    /// 上一帧是否绘制了放大镜，用于离开热区时擦除。
+    magnifier_on: bool,
+    /// 刚复制的颜色（短暂显示在放大镜标签里）。
+    copied_color: Option<String>,
 }
 
 impl Overlay {
@@ -653,9 +685,13 @@ impl Overlay {
                 SRCCOPY,
             );
 
-            // 步骤 2：无选区时只绘制操作提示。
+            // 步骤 2：无选区时只绘制操作提示与放大镜。
             let Some(current) = self.selection.current_rect() else {
                 self.draw_hint(hdc);
+                self.magnifier_on = self.magnifier_should_show();
+                if self.magnifier_on {
+                    self.draw_magnifier(hdc);
+                }
                 return;
             };
             let local = self.to_local(current);
@@ -715,6 +751,10 @@ impl Overlay {
             }
             self.draw_tooltip(hdc);
             self.draw_text_frame(hdc);
+            self.magnifier_on = self.magnifier_should_show();
+            if self.magnifier_on {
+                self.draw_magnifier(hdc);
+            }
         }
     }
 
@@ -969,6 +1009,191 @@ impl Overlay {
             };
             let _ = FillRect(hdc, &grip_rect, self.white);
             let _ = FrameRect(hdc, &grip_rect, self.accent);
+        }
+    }
+
+    /// 放大镜是否应显示：选区工具、未开始标注、不在工具栏/文字框上。
+    fn magnifier_should_show(&self) -> bool {
+        if self.text_editor.is_some() || self.has_shapes() || self.tool != Tool::Select {
+            return false;
+        }
+        let client = (self.cursor.0 - self.area.x, self.cursor.1 - self.area.y);
+        if !(0..self.area.width).contains(&client.0) || !(0..self.area.height).contains(&client.1) {
+            return false;
+        }
+        let over_toolbar = self
+            .toolbar
+            .as_ref()
+            .and_then(|toolbar| toolbar.hit(client.0, client.1))
+            .is_some();
+        if over_toolbar {
+            return false;
+        }
+        if let Some(rect) = self.selection.rect() {
+            if self.selection.is_active() {
+                return true;
+            }
+            if inside(rect, self.cursor) {
+                return SelectionState::handle_at(
+                    rect,
+                    self.cursor.0,
+                    self.cursor.1,
+                    HANDLE_HIT_TOLERANCE,
+                )
+                .is_some();
+            }
+        }
+        true
+    }
+
+    /// 计算放大镜位置、采样区域与中心颜色。
+    fn magnifier_layout(&self) -> Option<MagnifierLayout> {
+        let scale = self.scale_at(self.cursor.0, self.cursor.1);
+        let cell = (MAGNIFIER_ZOOM * scale).round().max(3.0) as i32;
+        let side = cell * MAGNIFIER_SAMPLES;
+        let client = (self.cursor.0 - self.area.x, self.cursor.1 - self.area.y);
+        let (host, _) = self.host_of(RectI::new(self.cursor.0, self.cursor.1, 1, 1));
+        let bounds = self.to_local(host.as_rect());
+        let gap = (16.0 * scale).round() as i32;
+        let (x, y) = magnifier_origin(client, side, bounds, gap);
+
+        let frame_width = self.frame.width as i32;
+        let frame_height = self.frame.height as i32;
+        let frame_x = self.cursor.0 - self.frame.origin.0;
+        let frame_y = self.cursor.1 - self.frame.origin.1;
+        let max_sx = (frame_width - MAGNIFIER_SAMPLES).max(0);
+        let max_sy = (frame_height - MAGNIFIER_SAMPLES).max(0);
+        let sx = (frame_x - MAGNIFIER_SAMPLES / 2).clamp(0, max_sx);
+        let sy = (frame_y - MAGNIFIER_SAMPLES / 2).clamp(0, max_sy);
+        let center = (
+            (frame_x - sx).clamp(0, MAGNIFIER_SAMPLES - 1),
+            (frame_y - sy).clamp(0, MAGNIFIER_SAMPLES - 1),
+        );
+
+        Some(MagnifierLayout {
+            x,
+            y,
+            side,
+            cell,
+            sx,
+            sy,
+            center,
+            scale,
+            bounds,
+            hex: pixel_hex(&self.frame, self.cursor.0, self.cursor.1)
+                .unwrap_or_else(|| "#000000".to_string()),
+        })
+    }
+
+    /// 绘制放大镜：采样像素、边框、十字线与颜色标签。
+    fn draw_magnifier(&mut self, hdc: HDC) {
+        let Some(layout) = self.magnifier_layout() else {
+            return;
+        };
+        let composed_width = self.composed.width as usize;
+        {
+            let frame = &self.frame;
+            let composed = self.composed.pixels_mut();
+            fill_magnifier(frame, composed, composed_width, &layout);
+        }
+
+        let scale = layout.scale;
+        let thickness = (2.0 * scale).round().max(1.0) as i32;
+        let shadow = (3.0 * scale).round().max(2.0) as i32;
+        unsafe {
+            fill(hdc, layout.x, layout.y, layout.side, thickness, self.accent);
+            fill(
+                hdc,
+                layout.x,
+                layout.y + layout.side - thickness,
+                layout.side,
+                thickness,
+                self.accent,
+            );
+            fill(hdc, layout.x, layout.y, thickness, layout.side, self.accent);
+            fill(
+                hdc,
+                layout.x + layout.side - thickness,
+                layout.y,
+                thickness,
+                layout.side,
+                self.accent,
+            );
+
+            let center_x = layout.x + layout.center.0 * layout.cell + layout.cell / 2;
+            let center_y = layout.y + layout.center.1 * layout.cell + layout.cell / 2;
+            fill(
+                hdc,
+                layout.x,
+                center_y - shadow / 2,
+                layout.side,
+                shadow,
+                self.dark,
+            );
+            fill(hdc, layout.x, center_y, layout.side, 1, self.white);
+            fill(
+                hdc,
+                center_x - shadow / 2,
+                layout.y,
+                shadow,
+                layout.side,
+                self.dark,
+            );
+            fill(hdc, center_x, layout.y, 1, layout.side, self.white);
+
+            let cell_rect = windows::Win32::Foundation::RECT {
+                left: layout.x + layout.center.0 * layout.cell,
+                top: layout.y + layout.center.1 * layout.cell,
+                right: layout.x + (layout.center.0 + 1) * layout.cell,
+                bottom: layout.y + (layout.center.1 + 1) * layout.cell,
+            };
+            let _ = FrameRect(hdc, &cell_rect, self.accent);
+        }
+
+        let text = match &self.copied_color {
+            Some(hex) => format!("已复制 {hex}"),
+            None => layout.hex.clone(),
+        };
+        let font = self.font_for(scale);
+        let (_, text_height) = unsafe { kit_text::text_size(hdc, &text, font) };
+        let chip_height = text_height + 2 * ((5.0 * scale) as i32);
+        let label_gap = (6.0 * scale).round() as i32;
+        let below = layout.y + layout.side + label_gap + chip_height / 2;
+        let center_y = if below + chip_height / 2 <= layout.bounds.y + layout.bounds.height {
+            below
+        } else {
+            (layout.y - label_gap - chip_height / 2).max(layout.bounds.y + chip_height / 2)
+        };
+        unsafe {
+            self.draw_chip(
+                hdc,
+                &text,
+                layout.x + layout.side / 2,
+                center_y,
+                scale,
+                layout.bounds,
+            );
+        }
+    }
+
+    /// 复制光标下的颜色值（`C`）。
+    fn copy_cursor_color(&mut self) {
+        if !self.magnifier_should_show() {
+            return;
+        }
+        let Some(hex) = pixel_hex(&self.frame, self.cursor.0, self.cursor.1) else {
+            return;
+        };
+        match clipboard::put_text(&hex) {
+            Ok(()) => {
+                ::log::info!("copied color {hex}");
+                self.copied_color = Some(hex);
+                unsafe {
+                    let _ = SetTimer(Some(self.hwnd), TIMER_COPY, 1200, None);
+                }
+                self.invalidate();
+            }
+            Err(error) => ::log::warn!("复制颜色失败: {error}"),
         }
     }
 
@@ -1346,8 +1571,13 @@ impl Overlay {
             self.invalidate();
         }
 
-        // 步骤 4：按最新状态刷新光标。
+        // 步骤 4：按最新状态刷新光标，并让放大镜跟随鼠标。
         self.update_cursor();
+        let show = self.magnifier_should_show();
+        if show || self.magnifier_on {
+            self.invalidate();
+        }
+        self.magnifier_on = show;
     }
 
     /// 处理左键释放：结束文字拖拽、标注或框选。
@@ -1441,10 +1671,11 @@ impl Overlay {
             return;
         }
 
-        // 步骤 4：普通快捷键：取消、确认、方向键、线宽与工具。
+        // 步骤 4：普通快捷键：取消、确认、取色、方向键、线宽与工具。
         match key {
             key if key == VK_ESCAPE.0 => self.cancel(),
             key if key == VK_RETURN.0 => self.confirm(OutputAction::Copy),
+            key if key == b'C' as u16 => self.copy_cursor_color(),
             key if key == VK_LEFT.0 => self.nudge(-1, 0, shift),
             key if key == VK_RIGHT.0 => self.nudge(1, 0, shift),
             key if key == VK_UP.0 => self.nudge(0, -1, shift),
@@ -1682,6 +1913,79 @@ fn force_foreground(hwnd: HWND) -> bool {
     }
 }
 
+/// 计算放大镜左上角：默认在光标右下，越界时翻到上方/左侧并夹紧。
+fn magnifier_origin(cursor: (i32, i32), side: i32, bounds: RectI, gap: i32) -> (i32, i32) {
+    let mut x = cursor.0 + gap;
+    let mut y = cursor.1 + gap;
+    if x + side > bounds.x + bounds.width {
+        x = cursor.0 - gap - side;
+    }
+    if y + side > bounds.y + bounds.height {
+        y = cursor.1 - gap - side;
+    }
+    x = x.clamp(bounds.x, (bounds.x + bounds.width - side).max(bounds.x));
+    y = y.clamp(bounds.y, (bounds.y + bounds.height - side).max(bounds.y));
+    (x, y)
+}
+
+/// 冻结帧中指定屏幕像素的 `#RRGGBB` 文本；越界返回 None。
+fn pixel_hex(frame: &Frame, x: i32, y: i32) -> Option<String> {
+    let local_x = x - frame.origin.0;
+    let local_y = y - frame.origin.1;
+    if local_x < 0 || local_y < 0 || local_x as u32 >= frame.width || local_y as u32 >= frame.height
+    {
+        return None;
+    }
+    let offset = (local_y as usize * frame.width as usize + local_x as usize) * 4;
+    let pixel = &frame.bgra[offset..offset + 4];
+    Some(format!("#{:02X}{:02X}{:02X}", pixel[2], pixel[1], pixel[0]))
+}
+
+/// 把采样区域按最近邻放大后直接写入合成缓冲。
+fn fill_magnifier(
+    frame: &Frame,
+    composed: &mut [u8],
+    composed_width: usize,
+    layout: &MagnifierLayout,
+) {
+    let composed_height = composed.len() / (composed_width * 4);
+    let source_width = frame.width as i32;
+    let source_height = frame.height as i32;
+
+    for cell_y in 0..MAGNIFIER_SAMPLES {
+        let source_y = layout.sy + cell_y;
+        if source_y < 0 || source_y >= source_height {
+            continue;
+        }
+        for cell_x in 0..MAGNIFIER_SAMPLES {
+            let source_x = layout.sx + cell_x;
+            if source_x < 0 || source_x >= source_width {
+                continue;
+            }
+            let source_offset = (source_y as usize * frame.width as usize + source_x as usize) * 4;
+            let pixel = &frame.bgra[source_offset..source_offset + 4];
+            let origin_x = layout.x + cell_x * layout.cell;
+            let origin_y = layout.y + cell_y * layout.cell;
+
+            for offset_y in 0..layout.cell {
+                let target_y = origin_y + offset_y;
+                if target_y < 0 || target_y as usize >= composed_height {
+                    continue;
+                }
+                let row = target_y as usize * composed_width;
+                for offset_x in 0..layout.cell {
+                    let target_x = origin_x + offset_x;
+                    if target_x < 0 || target_x as usize >= composed_width {
+                        continue;
+                    }
+                    let target = (row + target_x as usize) * 4;
+                    composed[target..target + 4].copy_from_slice(pixel);
+                }
+            }
+        }
+    }
+}
+
 /// 用画刷填充客户区矩形。
 unsafe fn fill(
     hdc: windows::Win32::Graphics::Gdi::HDC,
@@ -1839,6 +2143,11 @@ unsafe extern "system" fn overlay_wndproc(
                                 overlay.invalidate();
                             }
                         }
+                        TIMER_COPY => {
+                            let _ = KillTimer(Some(hwnd), TIMER_COPY);
+                            overlay.copied_color = None;
+                            overlay.invalidate();
+                        }
                         _ => {}
                     }
                 }
@@ -1942,5 +2251,64 @@ mod tests {
         // 完全不在任何显示器内（例如只覆盖副屏上方的空隙）时没有归属。
         let gap = RectI::new(3000, 0, 400, 100);
         assert!(largest_overlap_monitor(&monitors, gap).is_none());
+    }
+
+    #[test]
+    fn pixel_hex_reads_bgra_in_rgb_order() {
+        let frame = Frame {
+            width: 2,
+            height: 1,
+            origin: (100, 200),
+            bgra: vec![10, 20, 30, 255, 1, 2, 3, 255],
+        };
+
+        assert_eq!(pixel_hex(&frame, 100, 200).as_deref(), Some("#1E140A"));
+        assert_eq!(pixel_hex(&frame, 101, 200).as_deref(), Some("#030201"));
+        assert!(pixel_hex(&frame, 99, 200).is_none());
+        assert!(pixel_hex(&frame, 102, 200).is_none());
+    }
+
+    #[test]
+    fn magnifier_origin_flips_and_clamps_near_edges() {
+        let bounds = RectI::new(0, 0, 1000, 800);
+
+        assert_eq!(magnifier_origin((100, 100), 120, bounds, 16), (116, 116));
+        // 贴右/下边缘时翻到光标的左上。
+        assert_eq!(magnifier_origin((980, 100), 120, bounds, 16), (844, 116));
+        assert_eq!(magnifier_origin((100, 780), 120, bounds, 16), (116, 644));
+        assert_eq!(magnifier_origin((990, 790), 120, bounds, 16), (854, 654));
+    }
+
+    #[test]
+    fn fill_magnifier_repeats_each_source_pixel() {
+        let frame = Frame {
+            width: MAGNIFIER_SAMPLES as u32,
+            height: MAGNIFIER_SAMPLES as u32,
+            origin: (0, 0),
+            bgra: [7u8, 8, 9, 255]
+                .iter()
+                .copied()
+                .cycle()
+                .take(MAGNIFIER_SAMPLES as usize * MAGNIFIER_SAMPLES as usize * 4)
+                .collect(),
+        };
+        let layout = MagnifierLayout {
+            x: 0,
+            y: 0,
+            side: 30,
+            cell: 2,
+            sx: 0,
+            sy: 0,
+            center: (0, 0),
+            scale: 1.0,
+            bounds: RectI::new(0, 0, 100, 100),
+            hex: "#090807".to_string(),
+        };
+
+        let mut composed = vec![0u8; 30 * 30 * 4];
+        fill_magnifier(&frame, &mut composed, 30, &layout);
+        for pixel in composed.as_chunks::<4>().0 {
+            assert_eq!(pixel, &[7, 8, 9, 255]);
+        }
     }
 }
